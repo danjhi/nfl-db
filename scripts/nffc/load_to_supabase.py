@@ -20,7 +20,7 @@ with open(env_path) as f:
             os.environ[k.strip()] = v.strip()
 
 SUPABASE_URL = "https://twfzcrodldvhpfaykasj.supabase.co"
-SUPABASE_KEY = os.environ["SUPABASE_ANON_KEY"]
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_ANON_KEY"]
 CLEAN_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "clean")
 BATCH_SIZE = 500  # rows per request
 

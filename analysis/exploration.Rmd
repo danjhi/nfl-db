@@ -1144,6 +1144,464 @@ cat("5. ROLLING WINDOW: 5-10 games is the sweet spot. Fewer is too noisy,\n")
 cat("   more than ~16 starts capturing stale information.\n")
 ```
 
+## Variance Analysis for Simulation
+
+For a 2026 season simulation, we need more than just mean projections — we need to know how much each team's weekly output fluctuates. Key questions:
+
+1. How much of the variance in weekly FP is **between teams** vs **within teams** (game-to-game noise)?
+2. Is a team's variance level a **persistent trait** or just randomness?
+3. Are passing, rushing, and receiving deviations **correlated** within a game?
+4. What variance parameters should we plug into a simulation?
+
+### Step 17: Variance decomposition
+
+We decompose total variance into between-team and within-team components using ANOVA / ICC. The intra-class correlation (ICC) tells us what fraction of weekly variance is "team identity" — the rest is game-to-game noise that a simulation must build in.
+
+```{r variance-decomposition}
+# Focus on games with complete data
+var_data <- game_log |>
+  filter(!is.na(opponent), season >= 2020)
+
+# ICC via one-way random-effects ANOVA
+# ICC = (MSb - MSw) / (MSb + (k-1)*MSw) where k = avg group size
+compute_icc <- function(data, value_col, group_col = "recent_team") {
+  aov_fit <- aov(as.formula(paste(value_col, "~", group_col)), data = data)
+  ss <- summary(aov_fit)[[1]]
+  msb <- ss["Mean Sq"][[1]][1]  # between-group mean square
+  msw <- ss["Mean Sq"][[1]][2]  # within-group mean square
+  k <- nrow(data) / length(unique(data[[group_col]]))
+  icc <- (msb - msw) / (msb + (k - 1) * msw)
+  list(icc = icc, msb = msb, msw = msw, k = round(k, 1))
+}
+
+# Compute ICC for each category (offense and defense)
+cats <- c("team_fp_passing", "team_fp_rushing", "team_fp_receiving", "team_fp_total",
+          "def_allowed_fp_passing", "def_allowed_fp_rushing",
+          "def_allowed_fp_receiving", "def_allowed_fp_total")
+
+icc_results <- map_dfr(cats, function(col) {
+  res <- compute_icc(var_data |> filter(!is.na(.data[[col]])), col)
+  tibble(
+    metric = col,
+    icc = round(res$icc, 3),
+    between_ms = round(res$msb, 1),
+    within_ms = round(res$msw, 1),
+    weekly_sd = round(sqrt(res$msw), 1)
+  )
+})
+
+cat("=== Intra-Class Correlation (ICC) by Category (2020-2025) ===\n")
+cat("ICC = fraction of weekly variance explained by 'which team'\n")
+cat("Higher ICC = more team-driven, less random noise\n\n")
+print(icc_results)
+
+cat("\nInterpretation:\n")
+cat("- ICC around 0.10-0.15 means ~85-90% of weekly variance is NOISE, not team quality\n")
+cat("- This is expected — football is inherently high-variance game to game\n")
+cat("- The simulation must primarily model game-level noise, not team differences\n")
+```
+
+```{r variance-by-season}
+# Does this hold across individual seasons?
+icc_by_season <- map_dfr(2020:2025, function(yr) {
+  d <- var_data |> filter(season == yr)
+  map_dfr(c("team_fp_total", "team_fp_passing", "team_fp_rushing", "team_fp_receiving"), function(col) {
+    res <- compute_icc(d |> filter(!is.na(.data[[col]])), col)
+    tibble(season = yr, metric = col, icc = round(res$icc, 3))
+  })
+})
+
+cat("=== ICC by Season (is the team signal stable across years?) ===\n")
+icc_by_season |>
+  pivot_wider(names_from = metric, values_from = icc) |>
+  print()
+```
+
+### Step 18: Is team-level variance a persistent trait?
+
+Some teams feel "boom or bust" while others are steady. But is this real or just sampling? We test two ways: (1) YoY correlation of team SDs, and (2) Levene's test for equality of variances.
+
+```{r variance-persistence}
+# Compute team-season SDs
+team_sds <- game_log |>
+  filter(!is.na(opponent)) |>
+  group_by(recent_team, season) |>
+  summarise(
+    n_games = n(),
+    sd_total = sd(team_fp_total),
+    sd_passing = sd(team_fp_passing),
+    sd_rushing = sd(team_fp_rushing),
+    sd_receiving = sd(team_fp_receiving),
+    sd_def_total = sd(def_allowed_fp_total, na.rm = TRUE),
+    sd_def_passing = sd(def_allowed_fp_passing, na.rm = TRUE),
+    sd_def_rushing = sd(def_allowed_fp_rushing, na.rm = TRUE),
+    sd_def_receiving = sd(def_allowed_fp_receiving, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# YoY correlation: does a team's SD in year N predict SD in year N+1?
+sd_yoy <- team_sds |>
+  inner_join(
+    team_sds |> mutate(season = season - 1) |>
+      rename_with(~ paste0("next_", .x), -c(recent_team, season)),
+    by = c("recent_team", "season")
+  )
+
+cat("=== YoY Correlation of Team Standard Deviations ===\n")
+cat("(Does a 'boom/bust' team stay boom/bust the next year?)\n\n")
+sd_cols <- c("sd_total", "sd_passing", "sd_rushing", "sd_receiving",
+             "sd_def_total", "sd_def_passing", "sd_def_rushing", "sd_def_receiving")
+for (col in sd_cols) {
+  next_col <- paste0("next_", col)
+  r <- cor(sd_yoy[[col]], sd_yoy[[next_col]], use = "complete.obs")
+  cat(sprintf("  %-18s r = %+.3f\n", col, r))
+}
+
+cat("\nInterpretation:\n")
+cat("  r near 0 → variance is NOT persistent (mostly noise)\n")
+cat("  r > 0.20 → some signal — team style/roster affects variance\n")
+```
+
+```{r levene-test}
+# Levene's test: are team variances significantly different?
+# Uses median-based (Brown-Forsythe) variant which is robust to non-normality
+levene_test <- function(data, value_col) {
+  vals <- data[[value_col]]
+  groups <- data[["recent_team"]]
+  group_medians <- tapply(vals, groups, median, na.rm = TRUE)
+  abs_devs <- abs(vals - group_medians[groups])
+  aov_result <- summary(aov(abs_devs ~ groups))
+  f_val <- aov_result[[1]]["F value"][[1]][1]
+  p_val <- aov_result[[1]]["Pr(>F)"][[1]][1]
+  list(f = f_val, p = p_val)
+}
+
+cat("=== Brown-Forsythe Test: Do Teams Have Different Variances? ===\n")
+cat("(Null: all teams have equal variance)\n\n")
+
+# Test by season to avoid confounding
+bf_results <- map_dfr(c("team_fp_total", "team_fp_passing", "team_fp_rushing",
+                         "team_fp_receiving"), function(col) {
+  # Pool across 2020-2025
+  d <- game_log |> filter(season >= 2020, !is.na(.data[[col]]))
+  res <- levene_test(d, col)
+  tibble(
+    metric = col,
+    f_stat = round(res$f, 2),
+    p_value = round(res$p, 4),
+    significant = ifelse(res$p < 0.05, "YES", "no")
+  )
+})
+print(bf_results)
+
+cat("\nIf p < 0.05, teams DO have statistically different variances.\n")
+cat("But statistical significance ≠ practical significance. Check effect sizes below.\n")
+```
+
+```{r variance-spread-visual}
+# Visualize: team SD distributions for 2024
+team_sds |>
+  filter(season == 2024) |>
+  select(recent_team, sd_total, sd_passing, sd_rushing, sd_receiving) |>
+  pivot_longer(-recent_team, names_to = "category", values_to = "sd") |>
+  mutate(category = str_replace(category, "sd_", ""),
+         category = str_to_title(category)) |>
+  ggplot(aes(x = reorder(recent_team, -sd), y = sd, fill = category)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Team Weekly Standard Deviation by Category (2024)",
+    subtitle = "Higher = more boom/bust week to week",
+    x = NULL, y = "Weekly SD (fantasy points)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+```
+
+### Step 19: Category correlation structure within games
+
+When a team has a "boom" game in passing, does rushing also boom? Or do they substitute? This correlation structure matters for simulation — if categories are negatively correlated, total variance is lower than you'd get simulating them independently.
+
+```{r category-correlations}
+# Within-game deviations from team-season means
+game_devs <- game_log |>
+  filter(!is.na(opponent), season >= 2020) |>
+  group_by(recent_team, season) |>
+  mutate(
+    dev_passing = team_fp_passing - mean(team_fp_passing),
+    dev_rushing = team_fp_rushing - mean(team_fp_rushing),
+    dev_receiving = team_fp_receiving - mean(team_fp_receiving),
+    dev_def_passing = def_allowed_fp_passing - mean(def_allowed_fp_passing, na.rm = TRUE),
+    dev_def_rushing = def_allowed_fp_rushing - mean(def_allowed_fp_rushing, na.rm = TRUE),
+    dev_def_receiving = def_allowed_fp_receiving - mean(def_allowed_fp_receiving, na.rm = TRUE)
+  ) |>
+  ungroup()
+
+# Offense: passing vs rushing vs receiving deviations
+cat("=== Within-Game Category Correlation (Offense) ===\n")
+cat("(Deviations from team-season mean)\n\n")
+off_devs <- game_devs |>
+  select(dev_passing, dev_rushing, dev_receiving) |>
+  filter(complete.cases(pick(everything())))
+off_cor <- cor(off_devs)
+cat("  Passing vs Rushing:   ", round(off_cor["dev_passing", "dev_rushing"], 3), "\n")
+cat("  Passing vs Receiving: ", round(off_cor["dev_passing", "dev_receiving"], 3), "\n")
+cat("  Rushing vs Receiving: ", round(off_cor["dev_rushing", "dev_receiving"], 3), "\n")
+
+cat("\nDefense:\n")
+def_devs <- game_devs |>
+  select(dev_def_passing, dev_def_rushing, dev_def_receiving) |>
+  filter(complete.cases(pick(everything())))
+def_cor <- cor(def_devs)
+cat("  Pass vs Rush allowed:  ", round(def_cor["dev_def_passing", "dev_def_rushing"], 3), "\n")
+cat("  Pass vs Recv allowed:  ", round(def_cor["dev_def_passing", "dev_def_receiving"], 3), "\n")
+cat("  Rush vs Recv allowed:  ", round(def_cor["dev_def_rushing", "dev_def_receiving"], 3), "\n")
+```
+
+```{r correlation-implication}
+# What does this mean for simulation?
+# If we simulate categories independently with SDs from above,
+# the total SD would be sqrt(sd_pass^2 + sd_rush^2 + sd_recv^2)
+# But with correlations, total SD = sqrt(var_p + var_r + var_v + 2*cov_pr + 2*cov_pv + 2*cov_rv)
+
+# Calculate these for typical team
+avg_sds <- game_devs |>
+  summarise(
+    sd_p = sd(dev_passing, na.rm = TRUE),
+    sd_r = sd(dev_rushing, na.rm = TRUE),
+    sd_v = sd(dev_receiving, na.rm = TRUE)
+  )
+
+r_pr <- off_cor["dev_passing", "dev_rushing"]
+r_pv <- off_cor["dev_passing", "dev_receiving"]
+r_rv <- off_cor["dev_rushing", "dev_receiving"]
+
+sd_independent <- sqrt(avg_sds$sd_p^2 + avg_sds$sd_r^2 + avg_sds$sd_v^2)
+sd_correlated <- sqrt(
+  avg_sds$sd_p^2 + avg_sds$sd_r^2 + avg_sds$sd_v^2 +
+  2 * r_pr * avg_sds$sd_p * avg_sds$sd_r +
+  2 * r_pv * avg_sds$sd_p * avg_sds$sd_v +
+  2 * r_rv * avg_sds$sd_r * avg_sds$sd_v
+)
+
+cat("\n=== Simulation Impact ===\n")
+cat("Average weekly SDs:  passing =", round(avg_sds$sd_p, 1),
+    " rushing =", round(avg_sds$sd_r, 1),
+    " receiving =", round(avg_sds$sd_v, 1), "\n")
+cat("If categories were independent: total SD =", round(sd_independent, 1), "\n")
+cat("With actual correlations:       total SD =", round(sd_correlated, 1), "\n")
+cat("Actual observed total SD:       ", round(sd(game_devs$team_fp_total - mean(game_devs$team_fp_total), na.rm = TRUE), 1), "\n")
+
+cat("\nKey: passing & receiving are strongly correlated (both driven by pass volume).\n")
+cat("Rushing is weakly/negatively correlated with passing (substitution effect).\n")
+cat("This means simulating categories independently would OVERESTIMATE total variance\n")
+cat("if pass-recv correlation is positive, or get it roughly right if they offset.\n")
+```
+
+### Step 20: Simulation variance parameters
+
+Now we derive the actual numbers a simulation needs. For each team, we decompose their weekly output into: (1) a baseline expectation (from our model), (2) a game-environment adjustment (from Vegas lines), and (3) a residual (the noise to simulate). We characterize the residual distribution and check whether it's normal or fat-tailed.
+
+```{r residual-distribution}
+# Use our best model (Vegas implied total) to get residuals
+# These residuals represent the "noise" a simulation must generate
+sim_data <- game_log |>
+  filter(!is.na(implied_total), season >= 2020)
+
+m_total <- lm(team_fp_total ~ implied_total, data = sim_data)
+sim_data$resid_total <- residuals(m_total)
+
+# Category models
+m_pass <- lm(team_fp_passing ~ implied_total + roll_8_off_passing + opp_roll_8_def_passing,
+             data = sim_data |> filter(!is.na(roll_8_off_passing)))
+m_rush <- lm(team_fp_rushing ~ implied_total + roll_8_off_rushing + opp_roll_8_def_rushing,
+             data = sim_data |> filter(!is.na(roll_8_off_rushing)))
+m_recv <- lm(team_fp_receiving ~ implied_total + roll_8_off_receiving + opp_roll_8_def_receiving,
+             data = sim_data |> filter(!is.na(roll_8_off_receiving)))
+
+cat("=== Residual (Noise) Distribution for Simulation ===\n\n")
+cat("Total FP residuals:\n")
+cat("  Mean:", round(mean(sim_data$resid_total), 2), "(should be ~0)\n")
+cat("  SD:  ", round(sd(sim_data$resid_total), 1), "\n")
+cat("  Skew:", round(moments::skewness(sim_data$resid_total), 3), "\n")
+cat("  Kurt:", round(moments::kurtosis(sim_data$resid_total), 3), "(normal = 3)\n\n")
+
+# Check for fat tails via quantile comparison
+observed_q <- quantile(sim_data$resid_total, c(0.01, 0.05, 0.10, 0.90, 0.95, 0.99))
+normal_q <- qnorm(c(0.01, 0.05, 0.10, 0.90, 0.95, 0.99), 0, sd(sim_data$resid_total))
+
+cat("Tail comparison (observed vs normal):\n")
+cat(sprintf("  1st pctile:  %.1f vs %.1f (normal)\n", observed_q[1], normal_q[1]))
+cat(sprintf("  5th pctile:  %.1f vs %.1f (normal)\n", observed_q[2], normal_q[2]))
+cat(sprintf("  95th pctile: %.1f vs %.1f (normal)\n", observed_q[5], normal_q[5]))
+cat(sprintf("  99th pctile: %.1f vs %.1f (normal)\n", observed_q[6], normal_q[6]))
+```
+
+```{r residual-qq-plot}
+# QQ plot to visually assess normality
+tibble(resid = sim_data$resid_total) |>
+  ggplot(aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(
+    title = "QQ Plot: Total FP Residuals (after removing Vegas signal)",
+    subtitle = "Deviation from line = non-normal tails",
+    x = "Theoretical (Normal)", y = "Observed"
+  ) +
+  theme_minimal()
+```
+
+```{r sim-params-weekly}
+# Derive simulation parameters per team
+# We want: for each team, what's their typical residual SD?
+# (i.e., how much do they deviate from model expectations week to week?)
+
+team_resid_sds <- sim_data |>
+  group_by(recent_team) |>
+  summarise(
+    n_games = n(),
+    resid_sd_total = sd(resid_total),
+    .groups = "drop"
+  )
+
+league_resid_sd <- sd(sim_data$resid_total)
+
+cat("=== Team-Level Residual SDs (weekly noise after model) ===\n")
+cat("League average residual SD:", round(league_resid_sd, 1), "FP\n\n")
+team_resid_sds |>
+  mutate(vs_league = round(resid_sd_total / league_resid_sd, 2)) |>
+  arrange(desc(resid_sd_total)) |>
+  mutate(resid_sd_total = round(resid_sd_total, 1)) |>
+  print(n = 32)
+
+cat("\nTeams with ratio > 1.10 are more volatile than expected by model.\n")
+cat("Teams with ratio < 0.90 are more predictable.\n")
+cat("But recall from Step 18: team-level SD is mostly noise, not a persistent trait.\n")
+```
+
+```{r sim-params-seasonal}
+# For season-long simulation: what's the expected variance of season totals?
+# If weekly residuals are independent: season_SD = weekly_SD * sqrt(17)
+# If there's autocorrelation: we need to adjust
+
+# Test autocorrelation of residuals within a team-season
+autocor_results <- sim_data |>
+  group_by(recent_team, season) |>
+  arrange(week) |>
+  summarise(
+    n = n(),
+    lag1_cor = cor(resid_total[-n()], resid_total[-1], use = "complete.obs"),
+    .groups = "drop"
+  ) |>
+  filter(n >= 10)  # need enough games
+
+mean_autocor <- mean(autocor_results$lag1_cor, na.rm = TRUE)
+cat("=== Autocorrelation of Weekly Residuals ===\n")
+cat("Mean lag-1 autocorrelation:", round(mean_autocor, 3), "\n")
+cat("Distribution:\n")
+print(summary(autocor_results$lag1_cor))
+
+cat("\nIf autocorrelation ≈ 0: weeks are roughly independent.\n")
+cat("Weekly independence means season-total SD ≈ weekly SD × sqrt(17).\n\n")
+
+# Derive season-long parameters
+weekly_sd <- league_resid_sd
+season_sd_independent <- weekly_sd * sqrt(17)
+# With autocorrelation adjustment: SD * sqrt(n * (1 + 2*r*(n-1)/n) / (1-r^2))
+# Simplified for small r: SD * sqrt(n) * sqrt(1 + 2*r)
+season_sd_adjusted <- weekly_sd * sqrt(17) * sqrt(1 + 2 * mean_autocor)
+
+cat("=== Season-Long Simulation Parameters ===\n\n")
+cat("Weekly residual SD (after model):", round(weekly_sd, 1), "FP\n")
+cat("Season total SD (assuming independence):", round(season_sd_independent, 1), "FP\n")
+cat("Season total SD (with autocorrelation):", round(season_sd_adjusted, 1), "FP\n\n")
+
+cat("For a 2026 simulation:\n")
+cat("  1. Start with team baseline (from Step 10 projections)\n")
+cat("  2. Each week, adjust for game environment (Vegas implied total)\n")
+cat("  3. Add random noise ~ N(0, ", round(weekly_sd, 0), ") for total FP\n", sep = "")
+cat("  4. Split into categories using rolling shares + correlated noise\n")
+cat("  5. Season totals will have SD ≈", round(season_sd_independent, 0), "FP around projection\n")
+```
+
+```{r sim-params-category-detail}
+# Category-level simulation parameters with correlation matrix
+# These are the actual numbers you'd plug into a multivariate normal simulation
+
+cat_sim_data <- sim_data |>
+  filter(!is.na(roll_8_off_passing), !is.na(opp_roll_8_def_passing),
+         !is.na(roll_8_off_rushing), !is.na(opp_roll_8_def_rushing),
+         !is.na(roll_8_off_receiving), !is.na(opp_roll_8_def_receiving))
+
+# Refit category models on this consistent dataset
+m_pass_sim <- lm(team_fp_passing ~ implied_total + roll_8_off_passing + opp_roll_8_def_passing, data = cat_sim_data)
+m_rush_sim <- lm(team_fp_rushing ~ implied_total + roll_8_off_rushing + opp_roll_8_def_rushing, data = cat_sim_data)
+m_recv_sim <- lm(team_fp_receiving ~ implied_total + roll_8_off_receiving + opp_roll_8_def_receiving, data = cat_sim_data)
+
+# Get category residuals
+cat_sim_data <- cat_sim_data |>
+  mutate(
+    resid_pass = residuals(m_pass_sim),
+    resid_rush = residuals(m_rush_sim),
+    resid_recv = residuals(m_recv_sim)
+  )
+
+# Category SDs
+cat("\n=== Category-Level Simulation Parameters ===\n\n")
+cat("Weekly residual SDs (noise after model):\n")
+cat("  Passing:  ", round(sd(cat_sim_data$resid_pass), 1), "FP\n")
+cat("  Rushing:  ", round(sd(cat_sim_data$resid_rush), 1), "FP\n")
+cat("  Receiving:", round(sd(cat_sim_data$resid_recv), 1), "FP\n")
+
+# Correlation matrix of category residuals
+cat("\nCategory residual correlation matrix:\n")
+cat("(Use this for multivariate normal simulation)\n\n")
+resid_cor <- cor(cat_sim_data |> select(resid_pass, resid_rush, resid_recv))
+colnames(resid_cor) <- rownames(resid_cor) <- c("Passing", "Rushing", "Receiving")
+print(round(resid_cor, 3))
+
+cat("\nSimulation recipe:\n")
+cat("  1. Draw (pass, rush, recv) residuals from MVN with this correlation matrix\n")
+cat("  2. Scale by the SDs above\n")
+cat("  3. Add to category predictions from the two-step model\n")
+cat("  4. This preserves the pass/recv co-movement and rush substitution effect\n")
+```
+
+```{r variance-summary}
+cat("==================================================================\n")
+cat("  SUMMARY: Variance Parameters for 2026 Simulation                \n")
+cat("==================================================================\n\n")
+
+cat("WEEKLY LEVEL:\n")
+cat("  - ~85-90% of week-to-week variance is noise (not team quality)\n")
+cat("  - Total FP residual SD ≈", round(league_resid_sd, 0), "FP after Vegas model\n")
+cat("  - Team-level variance is NOT a persistent trait (low YoY r)\n")
+cat("  - Use a single league-wide noise SD, not team-specific ones\n\n")
+
+cat("CATEGORY STRUCTURE:\n")
+cat("  - Passing & receiving deviate together (r ≈", round(resid_cor["Passing","Receiving"], 2), ")\n")
+cat("  - Rushing substitutes for passing when games go off-script\n")
+cat("  - Simulate categories jointly using multivariate normal\n\n")
+
+cat("SEASON LEVEL:\n")
+cat("  - Weekly residuals are approximately independent (autocor ≈",
+    round(mean_autocor, 2), ")\n")
+cat("  - Season-total SD ≈", round(season_sd_independent, 0),
+    "FP (weekly SD × √17)\n")
+cat("  - A team projected for 70 FP/game → 1,190 season total\n")
+cat("    with 68% CI: [", round(1190 - season_sd_independent, 0), ",",
+    round(1190 + season_sd_independent, 0), "]\n\n")
+
+cat("SIMULATION STEPS:\n")
+cat("  1. Set team baselines from Step 10 regression projections\n")
+cat("  2. For each simulated week:\n")
+cat("     a. Set expected total from Vegas implied total (or baseline if no line)\n")
+cat("     b. Set expected category shares from 8-game rolling averages\n")
+cat("     c. Draw correlated (pass, rush, recv) noise from MVN\n")
+cat("     d. Add noise to get simulated weekly category FP\n")
+cat("  3. Sum 17 weeks for season totals\n")
+cat("  4. Repeat 10,000+ times for confidence intervals\n")
+```
+
 ## Draft Analysis Ideas
 
 ```{r draft-analysis}

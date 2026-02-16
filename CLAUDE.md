@@ -2,13 +2,14 @@
 
 ## Project Overview
 
-NFL Database — central repo for managing the Supabase database used across all NFL and fantasy football projects. Contains data pipelines, loading scripts, and schema documentation. No app code lives here.
+NFL Database — central repo for managing the Supabase database used across all NFL and fantasy football projects. Contains data pipelines, loading scripts, schema documentation, and DFS analysis notebooks. No app code lives here.
 
 ## Supabase
 
 - **Project ref:** `twfzcrodldvhpfaykasj`
 - **URL:** `https://twfzcrodldvhpfaykasj.supabase.co`
-- **Auth:** `.env` contains `SUPABASE_ANON_KEY`, `SUPABASE_ACCESS_TOKEN` (PAT), `NFFC_API_KEY`, `SPORTSDATA_API_KEY`, `FBG_API_KEY`
+- **Auth:** `.env` contains `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ACCESS_TOKEN` (PAT), `NFFC_API_KEY`, `SPORTSDATA_API_KEY`, `FBG_API_KEY`, `SUPABASE_DB_PASSWORD`
+- **Direct Postgres:** `db.twfzcrodldvhpfaykasj.supabase.co:5432` — use for DDL migrations when MCP is unavailable
 
 ## External APIs
 
@@ -63,6 +64,13 @@ Scripts are organized by data source.
 | `update_supabase_ids.py` | Merge all matched JSONs and PATCH players in Supabase |
 | `add_missing_players.py` | Insert players from Underdog top 500 not in DB |
 | `generate_update_sql.py` | Generate .sql file for bulk updates via Management API |
+| `load_underdog_adp.py` | Load Underdog ADP CSV into adp_sources table via REST API |
+
+### Analysis (`analysis/`)
+
+| File | Purpose |
+|------|---------|
+| `exploration.Rmd` | DFS analysis notebook: team FP prediction models, variance analysis, simulation parameters |
 
 ### Data Pipeline
 
@@ -83,6 +91,8 @@ DraftKings CSV → match_dk_ids.py → data/matched/dk_ids.json
 Drafters CSV → match_drafters_ids.py → data/matched/drafters_ids.json
 FBG crosswalk → match_fbg_ids.py → data/matched/fbg_ids.json
     → update_supabase_ids.py → Supabase (PATCH all IDs)
+
+Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table
 ```
 
 ## Database Schema
@@ -172,11 +182,23 @@ FBG crosswalk → match_fbg_ids.py → data/matched/fbg_ids.json
 |--------|------|-------|
 | `player_id` | text | FK → players |
 | `year` | integer | |
-| `adp` | numeric | Average draft position |
+| `adp` | numeric | Average draft position (NFFC Rotowire OC) |
 | `min_pick` | integer | Earliest pick |
 | `max_pick` | integer | Latest pick |
 | `times_drafted` | integer | |
 | PK | | (player_id, year) |
+
+#### `adp_sources`
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text | FK → players |
+| `source` | text | Platform name (e.g., "underdog", "draftkings", "drafters") |
+| `year` | integer | Season year |
+| `adp` | numeric | Average draft position on that platform |
+| `projected_points` | numeric | Platform's projected fantasy points (nullable) |
+| `position_rank` | text | Platform's position rank, e.g. "RB1" (nullable) |
+| `retrieved_at` | timestamptz | When data was pulled (defaults to now()) |
+| PK | | (player_id, source, year) |
 
 #### `player_seasons`
 | Column | Type | Notes |
@@ -213,13 +235,16 @@ LEFT JOIN player_seasons ps ON dp.player_id = ps.player_id AND dp.year = ps.year
 | `idx_leagues_year` | leagues | (year) |
 | `idx_players_position` | players | (position) |
 | `idx_adp_player_id` | adp | (player_id) |
+| `idx_adp_sources_source_year` | adp_sources | (source, year) |
 
 ### RLS
 
 All tables: RLS enabled. Policies:
 - **SELECT**: Public (anon can read all tables)
-- **INSERT**: Anon can insert into all tables
-- **UPDATE**: Anon can update players table
+- **INSERT**: Only `adp_sources` allows anon insert
+- **All other writes**: Use `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS)
+
+**Note:** The `postgres` role is subject to RLS. Use `pg_stat_user_tables.n_live_tup` for row counts, or connect via the REST API with the anon/service key.
 
 ### Migrations Applied
 
@@ -231,56 +256,89 @@ All tables: RLS enabled. Policies:
 6. `create_view_draft_board` — Pre-joined view
 7. `create_player_seasons` — Player-season-team table
 8. `update_view_draft_board_season_team` — Add COALESCE team logic to view
-9. `add_player_id_columns` — 18 new ID columns on players table
-10. `add_write_rls_policies` — INSERT/UPDATE policies for anon key
+9. `fix_view_security_invoker` — Security invoker on view_draft_board
+10. `drop_permissive_anon_write_policies` — Removed anon INSERT/UPDATE from main tables
+
+Applied via direct SQL (not tracked in migration system):
+- Player ID columns — 18 new ID columns on players table
+- `adp_sources` table — Multi-source ADP table with RLS (SELECT + INSERT for anon)
 
 ## Data Row Counts
 
 | Table | Rows |
 |-------|------|
-| `players` | 1,753 |
+| `players` | 1,749 |
 | `leagues` | 2,629 |
 | `league_teams` | 31,548 |
 | `adp` | 5,339 |
-| `draft_picks` | 621,356 |
+| `draft_picks` | 618,856 |
 | `player_seasons` | 6,060 |
+| `adp_sources` | 1,034 |
 
-### Player ID Coverage (1,753 players)
+### Player ID Coverage (1,749 players)
 
 | ID Column | Count | Coverage |
 |-----------|-------|----------|
-| `sleeper_id` | 1,656 | 94.5% |
-| `rotowire_id` | 1,605 | 91.6% |
-| `stats_id` | 1,585 | 90.4% |
-| `espn_id` | 1,573 | 89.7% |
-| `mfl_id` | 1,548 | 88.3% |
-| `stats_global_id` | 1,548 | 88.3% |
-| `cbs_id` | 1,539 | 87.8% |
-| `gsis_id` | 1,532 | 87.4% |
-| `fantasypros_id` | 1,515 | 86.4% |
-| `pff_id` | 1,512 | 86.3% |
-| `pfr_id` | 1,503 | 85.7% |
-| `fantasy_data_id` | 1,497 | 85.4% |
-| `yahoo_id` | 1,486 | 84.8% |
-| `draftkings_id` | 1,173 | 66.9% |
-| `drafters_id` | 1,123 | 64.1% |
-| `sportsdata_id` | 1,115 | 63.6% |
-| `swish_id` | 1,111 | 63.4% |
-| `fanduel_id` | 1,106 | 63.1% |
-| `underdog_id` | 1,034 | 59.0% |
-| `footballguys_id` | 1,023 | 58.4% |
-| `cfbref_id` | 878 | 50.1% |
-| `rotoworld_id` | 878 | 50.1% |
+| `sleeper_id` | 1,656 | 94.7% |
+| `rotowire_id` | 1,605 | 91.8% |
+| `stats_id` | 1,585 | 90.6% |
+| `espn_id` | 1,573 | 89.9% |
+| `mfl_id` | 1,548 | 88.5% |
+| `stats_global_id` | 1,548 | 88.5% |
+| `cbs_id` | 1,539 | 88.0% |
+| `gsis_id` | 1,532 | 87.6% |
+| `fantasypros_id` | 1,515 | 86.6% |
+| `pff_id` | 1,512 | 86.4% |
+| `pfr_id` | 1,503 | 85.9% |
+| `fantasy_data_id` | 1,497 | 85.6% |
+| `yahoo_id` | 1,486 | 85.0% |
+| `draftkings_id` | 1,170 | 66.9% |
+| `drafters_id` | 1,121 | 64.1% |
+| `sportsdata_id` | 1,113 | 63.6% |
+| `swish_id` | 1,111 | 63.5% |
+| `fanduel_id` | 1,104 | 63.1% |
+| `underdog_id` | 1,034 | 59.1% |
+| `footballguys_id` | 1,021 | 58.4% |
+| `cfbref_id` | 878 | 50.2% |
+| `rotoworld_id` | 878 | 50.2% |
 | `ktc_id` | 455 | 26.0% |
 | `fleaflicker_id` | 70 | 4.0% |
+
+### ADP Sources Coverage
+
+| Source | Year | Rows |
+|--------|------|------|
+| `underdog` | 2026 | 1,034 |
 
 ## Data Import Files
 
 Located in `data/imports/` (git-ignored):
-- `underdog_ADP.csv` — Underdog Fantasy Early Best Ball rankings (1,372 players)
+- `underdog_ADP.csv` — Underdog Fantasy Early Best Ball rankings (1,372 players, 1,034 matched to DB)
 - `DkPreDraftRankings.csv` — DraftKings pre-draft rankings (1,472 players)
 - `drafters_players.csv` — Drafters platform player list (1,999 players)
 - `fbg_crosswalk.csv` — FBG ID → SportsDataIO ID mapping (1,867 rows)
+
+## DFS Analysis Findings (from exploration.Rmd)
+
+### Prediction Models (Steps 11-16)
+- **Vegas implied total** is the best single predictor of team total FP (R² ≈ 0.19 on test). Rolling averages add nothing once Vegas is included.
+- **Two-step model** is best for category prediction: (1) predict total from implied_total, (2) predict category shares from 8-game rolling averages, (3) multiply.
+- **Rolling window sweet spot**: 5-10 games. Biggest marginal R² gains in first 3-5 games, diminishing returns after ~8.
+- **Rushing** is the category where opponent defensive rolling avg adds most independent signal beyond Vegas.
+- Even best models explain ~13% of category variance — individual games are inherently noisy.
+
+### Year-over-Year Correlations (Steps 9-10)
+- Offense (r=0.40) stickier than defense (r=0.26)
+- By category: Passing r=0.43, Rushing r=0.44, Receiving r=0.45
+- 2026 baselines projected using regression toward the mean: `proj = lg_mean + r × (team_2025 - lg_mean)`
+
+### Variance / Simulation Parameters (Steps 17-20)
+- **~85-90% of weekly variance is noise**, not team quality (ICC ≈ 0.10-0.15)
+- **Team-level variance is NOT persistent** — a boom/bust team doesn't stay boom/bust (low YoY SD correlation)
+- **Use a single league-wide noise SD**, not team-specific
+- **Category correlation structure**: passing & receiving deviate together (both driven by pass volume); rushing substitutes for passing (negative/weak correlation)
+- **Weekly residuals are approximately independent** (lag-1 autocorrelation ≈ 0) → season SD ≈ weekly SD × √17
+- **Simulation recipe**: (1) set team baseline from regression projections, (2) each week adjust for Vegas, (3) draw correlated (pass/rush/recv) noise from multivariate normal, (4) sum 17 weeks, (5) repeat 10,000+ times
 
 ## Planned Future Tables
 
@@ -294,14 +352,14 @@ Located in `data/imports/` (git-ignored):
 ### Player Enrichment (Phase 4)
 - `player_stats` — Weekly/seasonal stats (from nflreadr)
 - `player_projections` — Weekly projections (from FBG API, full season 2026)
-- `adp_sources` — ADP from multiple sites (Underdog, DK, Drafters, NFFC)
 - `dynasty_values` — User's dynasty valuations
 - `player_notes` — Written content per player
 
 ### Other Planned Data
 - Biographical enrichment (height, weight, photos from SportsData.io)
 - Headshots (from SportsData.io `PhotoUrl`, `UsaTodayHeadshotNoBackgroundUrl`)
-- Calculated values from past stats
+- DraftKings and Drafters ADP into `adp_sources`
+- 2026 season simulation engine
 
 ## Key Gotchas
 
@@ -314,8 +372,13 @@ Located in `data/imports/` (git-ignored):
 - `pick_duration` can exceed 32K — needs integer, not smallint
 - Some `birth_date` values are "0000-00-00" — treated as NULL
 - Supabase Management API has tight rate limits (~2 req/min) — prefer REST API for bulk operations
+- Supabase MCP token expires; can bypass with direct Postgres via RPostgres (R) using `SUPABASE_DB_PASSWORD`
 - REST API batch POSTs require all objects to have identical keys — insert individually for variable schemas
 - FBG API player IDs are abbreviated name+year codes, not numeric — need crosswalk to match
 - Rookies not in nflreadr may use Underdog UUID as player_id
 - Sleeper API requires no auth, returns ~5MB — call sparingly (once/day). Best source for sleeper_id + cross-referencing sportradar_ids
 - SportsData.io Rookies/{season} endpoint is best source for pre-draft rookie IDs
+- Use `python3` not `python` on this Mac
+- nflreadr `spread_line`: positive = home team favored (NOT standard betting convention)
+- nflreadr `clean_homeaway()` does NOT transform `spread_line` — same value for both rows
+- ggplot `scale_color_manual` labels: use NAMED vector to avoid alphabetical ordering bug

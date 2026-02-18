@@ -65,6 +65,21 @@ Scripts are organized by data source.
 | `add_missing_players.py` | Insert players from Underdog top 500 not in DB |
 | `generate_update_sql.py` | Generate .sql file for bulk updates via Management API |
 | `load_underdog_adp.py` | Load Underdog ADP CSV into adp_sources table via REST API |
+| `match_dan_ids.py` | Bootstrap dan_id on players + initial dynasty_values load from CSV |
+| `enrich_from_fbg.py` | Fetch FBG NFLPlayers.json → fill footballguys_id, fantasy_data_id, height, weight gaps |
+| `enrich_from_sportsdata.py` | Fetch SportsData.io Players → fill height, weight, headshot, college, IDs, status |
+
+### ADP (`scripts/adp/`)
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_underdog_adp.py` | Fetch daily Underdog ADP CSV → upsert into adp_sources (designed to run daily) |
+
+### Google Apps Script (`scripts/google-apps-script/`)
+
+| File | Purpose |
+|------|---------|
+| `dynasty_values_sync.js` | Sync dynasty values from Google Sheet → Supabase. Paste into Extensions → Apps Script. Uses service role key stored in Script Properties. |
 
 ### Analysis (`analysis/`)
 
@@ -92,7 +107,14 @@ Drafters CSV → match_drafters_ids.py → data/matched/drafters_ids.json
 FBG crosswalk → match_fbg_ids.py → data/matched/fbg_ids.json
     → update_supabase_ids.py → Supabase (PATCH all IDs)
 
-Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table
+Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table (one-time historical)
+Underdog ADP endpoint → fetch_underdog_adp.py → Supabase adp_sources table (daily snapshots)
+
+Dynasty values CSV → match_dan_ids.py → Supabase players (dan_id) + dynasty_values (bootstrap)
+Google Sheet → Apps Script (dynasty_values_sync.js) → Supabase dynasty_values (ongoing sync)
+
+FBG NFLPlayers.json → enrich_from_fbg.py → Supabase players (footballguys_id, fantasy_data_id, height, weight)
+SportsData.io Players → enrich_from_sportsdata.py → Supabase players (height, weight, headshot, college, IDs, status)
 ```
 
 ## Database Schema
@@ -138,6 +160,9 @@ Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table
 | `draftkings_id` | text | DraftKings player ID (from SportsData.io or CSV) |
 | `underdog_id` | text | Underdog Fantasy UUID |
 | `drafters_id` | text | Drafters platform ID |
+| `dan_id` | text | Personal custom ID (unique partial index, used for dynasty values sync) |
+| `height` | text | e.g. "6-2" (from FBG) |
+| `weight` | integer | In pounds (from FBG) |
 
 #### `leagues`
 | Column | Type | Notes |
@@ -194,11 +219,24 @@ Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table
 | `player_id` | text | FK → players |
 | `source` | text | Platform name (e.g., "underdog", "draftkings", "drafters") |
 | `year` | integer | Season year |
+| `date` | date | Date of the ADP snapshot (defaults to CURRENT_DATE) |
 | `adp` | numeric | Average draft position on that platform |
 | `projected_points` | numeric | Platform's projected fantasy points (nullable) |
 | `position_rank` | text | Platform's position rank, e.g. "RB1" (nullable) |
 | `retrieved_at` | timestamptz | When data was pulled (defaults to now()) |
-| PK | | (player_id, source, year) |
+| PK | | (player_id, source, year, date) |
+
+Daily snapshots allow ADP tracking over time. Each day's fetch creates new rows rather than overwriting.
+
+#### `dynasty_values`
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text PK | FK → players |
+| `value` | numeric | 1QB dynasty trade value (NOT NULL) |
+| `sf_value` | numeric | Superflex dynasty trade value (nullable) |
+| `updated_at` | timestamptz | Last sync time (defaults to now()) |
+
+Synced from Google Sheet via Google Apps Script. Full replace (delete + insert) on each push.
 
 #### `player_seasons`
 | Column | Type | Notes |
@@ -235,13 +273,16 @@ LEFT JOIN player_seasons ps ON dp.player_id = ps.player_id AND dp.year = ps.year
 | `idx_leagues_year` | leagues | (year) |
 | `idx_players_position` | players | (position) |
 | `idx_adp_player_id` | adp | (player_id) |
-| `idx_adp_sources_source_year` | adp_sources | (source, year) |
+| `idx_adp_sources_date` | adp_sources | (date DESC) |
+| `idx_adp_sources_source_year_date` | adp_sources | (source, year, date DESC) |
+| `idx_players_dan_id` | players | (dan_id) WHERE dan_id IS NOT NULL (unique partial) |
+| `idx_dynasty_values_updated` | dynasty_values | (updated_at) |
 
 ### RLS
 
 All tables: RLS enabled. Policies:
 - **SELECT**: Public (anon can read all tables)
-- **INSERT**: Only `adp_sources` allows anon insert
+- **INSERT**: Only `adp_sources` allows anon insert. `dynasty_values` does NOT (writes via service role key from Apps Script)
 - **All other writes**: Use `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS)
 
 **Note:** The `postgres` role is subject to RLS. Use `pg_stat_user_tables.n_live_tup` for row counts, or connect via the REST API with the anon/service key.
@@ -259,6 +300,11 @@ All tables: RLS enabled. Policies:
 9. `fix_view_security_invoker` — Security invoker on view_draft_board
 10. `drop_permissive_anon_write_policies` — Removed anon INSERT/UPDATE from main tables
 
+11. `add_dan_id_to_players` — dan_id column + unique partial index on players
+12. `create_dynasty_values` — Dynasty values table with RLS (anon SELECT only)
+13. `add_height_weight_to_players` — height (text) and weight (integer) columns on players
+14. `add_date_to_adp_sources` — date column + new PK (player_id, source, year, date) for daily tracking
+
 Applied via direct SQL (not tracked in migration system):
 - Player ID columns — 18 new ID columns on players table
 - `adp_sources` table — Multi-source ADP table with RLS (SELECT + INSERT for anon)
@@ -273,7 +319,8 @@ Applied via direct SQL (not tracked in migration system):
 | `adp` | 5,339 |
 | `draft_picks` | 618,856 |
 | `player_seasons` | 6,060 |
-| `adp_sources` | 1,034 |
+| `adp_sources` | 1,431 |
+| `dynasty_values` | 633 |
 
 ### Player ID Coverage (1,749 players)
 
@@ -306,9 +353,9 @@ Applied via direct SQL (not tracked in migration system):
 
 ### ADP Sources Coverage
 
-| Source | Year | Rows |
-|--------|------|------|
-| `underdog` | 2026 | 1,034 |
+| Source | Year | Dates Tracked | Latest Row Count |
+|--------|------|---------------|-----------------|
+| `underdog` | 2026 | 2 (Feb 16-18) | 1,431 total |
 
 ## Data Import Files
 
@@ -317,6 +364,7 @@ Located in `data/imports/` (git-ignored):
 - `DkPreDraftRankings.csv` — DraftKings pre-draft rankings (1,472 players)
 - `drafters_players.csv` — Drafters platform player list (1,999 players)
 - `fbg_crosswalk.csv` — FBG ID → SportsDataIO ID mapping (1,867 rows)
+- `dynasty_values.csv` — Exported Google Sheet for bootstrapping dan_id + initial dynasty values
 
 ## DFS Analysis Findings (from exploration.Rmd)
 
@@ -352,7 +400,6 @@ Located in `data/imports/` (git-ignored):
 ### Player Enrichment (Phase 4)
 - `player_stats` — Weekly/seasonal stats (from nflreadr)
 - `player_projections` — Weekly projections (from FBG API, full season 2026)
-- `dynasty_values` — User's dynasty valuations
 - `player_notes` — Written content per player
 
 ### Other Planned Data

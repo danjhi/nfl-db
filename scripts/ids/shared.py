@@ -114,6 +114,8 @@ PLAYER_ALIASES = {
     "robbie chosen anderson": "robbie anderson",
     "chosen anderson": "robbie anderson",
     "robbie anderson": "chosen anderson",
+    "keandre lambert": "keandre lambert-smith",
+    "keandre lambert-smith": "keandre lambert",
 }
 
 

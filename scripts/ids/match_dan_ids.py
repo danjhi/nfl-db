@@ -29,7 +29,7 @@ from shared import (
     supabase_rest_patch,
 )
 
-CSV_PATH = os.path.join(IMPORTS_DIR, "dynasty_values.csv")
+CSV_PATH = os.path.join(IMPORTS_DIR, "dan_tradevalues_with_rookies.csv")
 
 
 def upsert_dynasty_value(row):

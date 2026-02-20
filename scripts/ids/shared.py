@@ -49,17 +49,31 @@ def normalize_name(name):
 
 
 def normalize_team(team):
-    """Normalize team abbreviation."""
+    """Normalize team abbreviation to nflreadr standard.
+
+    nflreadr uses: LA (Rams), JAX (Jaguars), LV (Raiders), WAS (Commanders).
+    External sources may use LAR, JAC, OAK, WSH, or various long-form variants.
+    Returns empty string for free agents / no team.
+    """
     if not team:
         return ""
     team = team.upper().strip()
-    # Common mappings
     mapping = {
-        "LA": "LAR", "LAR": "LAR",
-        "JAC": "JAX", "JAX": "JAX",
-        "WSH": "WAS", "WAS": "WAS",
-        "LV": "LV", "OAK": "LV",
-        "FA": "",  # Free agent = no team
+        # Rams: nflreadr=LA, SportsData/others=LAR
+        "LAR": "LA", "RAM": "LA", "STL": "LA",
+        # Jaguars
+        "JAC": "JAX",
+        # Commanders
+        "WSH": "WAS",
+        # Raiders (current=LV)
+        "OAK": "LV", "LVR": "LV",
+        # Long-form variants (nflreadr ff_playerids, FBG, etc.)
+        "GBP": "GB", "KCC": "KC", "NEP": "NE",
+        "NOS": "NO", "SFO": "SF", "TBB": "TB",
+        # Historical
+        "SDC": "LAC",
+        # Free agents
+        "FA": "", "FA*": "",
     }
     return mapping.get(team, team)
 
@@ -83,7 +97,7 @@ TEAM_FULLNAME_TO_ABBR = {
     "kansas city chiefs": "KC",
     "las vegas raiders": "LV",
     "los angeles chargers": "LAC",
-    "los angeles rams": "LAR",
+    "los angeles rams": "LA",
     "miami dolphins": "MIA",
     "minnesota vikings": "MIN",
     "new england patriots": "NE",
@@ -116,6 +130,10 @@ PLAYER_ALIASES = {
     "robbie anderson": "chosen anderson",
     "keandre lambert": "keandre lambert-smith",
     "keandre lambert-smith": "keandre lambert",
+    "bam knight": "zonovan knight",
+    "zonovan knight": "bam knight",
+    "mitch tinsley": "mitchell tinsley",
+    "mitchell tinsley": "mitch tinsley",
 }
 
 

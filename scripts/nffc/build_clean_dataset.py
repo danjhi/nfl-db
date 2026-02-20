@@ -193,7 +193,12 @@ def build_players(picks, adp_all_years):
 
 
 def build_adp():
-    """Build clean ADP table."""
+    """Build clean ADP table.
+
+    NOTE: The API's "number" field counts drafts across ALL NFFC contest types,
+    not just Rotowire OC. We store it temporarily but recalculate times_drafted
+    from actual draft picks in fix_times_drafted().
+    """
     adp_all_years = {}
     adp_rows = []
 
@@ -209,10 +214,29 @@ def build_adp():
                 "adp": float(entry["adp"]),
                 "min_pick": entry["min_pick"],
                 "max_pick": entry["max_pick"],
-                "times_drafted": entry["number"],
+                "times_drafted": entry["number"],  # NFFC-wide, fixed later
             })
 
     return adp_rows, adp_all_years
+
+
+def fix_times_drafted(adp_rows, picks):
+    """Recalculate times_drafted from actual Rotowire OC draft picks.
+
+    The NFFC API's "number" field counts across all contest types, but our ADP
+    is Rotowire-OC-specific. Recalculate from draft_picks (which are ROC-only).
+    Players not drafted in ROC (kickers, defenses) get times_drafted=0.
+    """
+    from collections import Counter
+    pick_counts = Counter((p["player_id"], p["year"]) for p in picks if p["player_id"])
+    fixed = 0
+    for row in adp_rows:
+        correct = pick_counts.get((row["player_id"], row["year"]), 0)
+        if row["times_drafted"] != correct:
+            fixed += 1
+        row["times_drafted"] = correct
+    print(f"  Fixed times_drafted for {fixed}/{len(adp_rows)} ADP rows")
+    return adp_rows
 
 
 def write_csv(path, rows, fieldnames=None):
@@ -247,6 +271,10 @@ def main():
     print("\n3. Draft picks...")
     picks = build_draft_picks(leagues_lookup)
     print(f"  {len(picks):,} picks")
+
+    # 3b. Fix times_drafted using actual ROC draft picks
+    print("\n3b. Fixing times_drafted (API counts all contest types)...")
+    adp_rows = fix_times_drafted(adp_rows, picks)
 
     # 4. Players (enriched)
     print("\n4. Players (nflreadr enrichment)...")

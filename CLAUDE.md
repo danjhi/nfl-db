@@ -44,7 +44,7 @@ Scripts are organized by data source.
 | Script | Purpose |
 |--------|---------|
 | `pull_draft_results.py` | Pull raw NFFC API data (all contest types, 2018-2025) into `data/raw/` |
-| `build_clean_dataset.py` | Filter to Rotowire OC, enrich via nflreadr, output CSVs to `data/clean/` |
+| `build_clean_dataset.py` | Filter to Rotowire OC, enrich via nflreadr, fix times_drafted from draft_picks, output CSVs to `data/clean/` |
 | `load_to_supabase.py` | Load clean CSVs into Supabase via REST API |
 | `build_player_seasons.R` | Build player-season-team CSV from nflreadr rosters (requires R + nflreadr) |
 
@@ -68,18 +68,58 @@ Scripts are organized by data source.
 | `match_dan_ids.py` | Bootstrap dan_id on players + initial dynasty_values load from CSV |
 | `enrich_from_fbg.py` | Fetch FBG NFLPlayers.json → fill footballguys_id, fantasy_data_id, height, weight gaps |
 | `enrich_from_sportsdata.py` | Fetch SportsData.io Players → fill height, weight, headshot, college, IDs, status |
+| `refresh_player_teams.py` | Daily: pull Sleeper API, compare teams, PATCH `latest_team` changes. Supports `--dry-run` |
+| `run_daily_team_refresh.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
+
+### Teams (`scripts/teams/`)
+
+| Script | Purpose |
+|--------|---------|
+| `export_teams.R` | Export nflreadr `load_teams()` → `data/nflreadr/teams.csv` (requires R + nflreadr) |
+| `load_teams.py` | Load teams CSV into Supabase teams table via REST API |
+| `build_team_game_stats.R` | Build team-game-level stats from nflreadr (2016-2025) → `data/nflreadr/team_game_stats.csv` |
+| `load_team_game_stats.py` | Load team game stats CSV into Supabase (excludes generated columns from payload) |
+
+### Player Stats (`scripts/stats/`)
+
+| Script | Purpose |
+|--------|---------|
+| `build_player_stats.R` | Export weekly player stats from nflreadr (2016-2025) → `data/nflreadr/player_stats.csv`. Maps gsis_id → sportradar_id via ff_playerids.csv |
+| `load_player_stats.py` | Load player stats CSV into Supabase (filters to DB players, excludes generated PPR columns) |
 
 ### ADP (`scripts/adp/`)
 
 | Script | Purpose |
 |--------|---------|
 | `fetch_underdog_adp.py` | Fetch daily Underdog ADP CSV → upsert into adp_sources (designed to run daily) |
+| `run_daily_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
+| `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
+
+### Projections (`scripts/projections/`)
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_fbg_projections.py` | Fetch FBG preseason projections → calculate half-PPR → upsert into player_projections |
+
+### Player Notes (`scripts/notes/`)
+
+| Script | Purpose |
+|--------|---------|
+| `push_writeups.py` | Read `data/writeups/player_writeups.yaml`, filter non-empty writeups, upsert into `player_notes` via REST API. Supports `--dry-run` |
+
+### Enrichment (`scripts/ids/`)
+
+| Script | Purpose |
+|--------|---------|
+| `upload_rookie_headshots.py` | Upload rookie headshot PNGs to Supabase Storage → set headshot_url on players |
+| `load_dynasty_value_history.py` | One-time backfill of change log CSV into dynasty_value_history table. Matches Player→dan_id→player_id with name fallback |
 
 ### Google Apps Script (`scripts/google-apps-script/`)
 
 | File | Purpose |
 |------|---------|
 | `dynasty_values_sync.js` | Sync dynasty values from Google Sheet → Supabase. Paste into Extensions → Apps Script. Uses service role key stored in Script Properties. |
+| `dynasty_value_history_sync.js` | Sync dynasty value change log from Google Sheet → Supabase. Same setup pattern as dynasty_values_sync. Matches Player names to player_id via normalized name lookup. |
 
 ### Analysis (`analysis/`)
 
@@ -112,10 +152,43 @@ Underdog ADP endpoint → fetch_underdog_adp.py → Supabase adp_sources table (
 
 Dynasty values CSV → match_dan_ids.py → Supabase players (dan_id) + dynasty_values (bootstrap)
 Google Sheet → Apps Script (dynasty_values_sync.js) → Supabase dynasty_values (ongoing sync)
+Change Log Sheet → Apps Script (dynasty_value_history_sync.js) → Supabase dynasty_value_history (ongoing sync)
+Change Log CSV → load_dynasty_value_history.py → Supabase dynasty_value_history (one-time backfill)
 
 FBG NFLPlayers.json → enrich_from_fbg.py → Supabase players (footballguys_id, fantasy_data_id, height, weight)
 SportsData.io Players → enrich_from_sportsdata.py → Supabase players (height, weight, headshot, college, IDs, status)
+
+nflreadr (R) → export_teams.R → data/nflreadr/teams.csv → load_teams.py → Supabase teams table
+nflreadr (R) → build_team_game_stats.R → data/nflreadr/team_game_stats.csv → load_team_game_stats.py → Supabase team_game_stats
+nflreadr (R) → build_player_stats.R → data/nflreadr/player_stats.csv → load_player_stats.py → Supabase player_stats
+
+FBG preseason API → fetch_fbg_projections.py → Supabase player_projections (half-PPR season projections)
+Rookie headshot PNGs → upload_rookie_headshots.py → Supabase Storage (headshots bucket) → players.headshot_url
+
+Sleeper API → refresh_player_teams.py → Supabase players.latest_team (daily, via launchd)
+
+Player writeups YAML → push_writeups.py → Supabase player_notes (upsert, service role key)
 ```
+
+### Daily Automation (launchd)
+
+Both jobs use macOS launchd with bash wrappers. Date-gated to Feb 19 – Apr 22, 2026.
+
+| Job | Plist | Schedule | Script |
+|-----|-------|----------|--------|
+| Underdog ADP | `~/Library/LaunchAgents/com.nfldb.daily-adp.plist` | 8:00 AM | `scripts/adp/run_daily_adp.sh` → `fetch_underdog_adp.py` |
+| Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | `scripts/ids/run_daily_team_refresh.sh` → `refresh_player_teams.py` |
+
+Logs: `data/logs/underdog_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
+
+**Important**: Plists must use `/bin/bash` as explicit interpreter (not just the script path) to avoid macOS `com.apple.provenance` blocking.
+
+To manage:
+- `launchctl load ~/Library/LaunchAgents/com.nfldb.daily-*.plist` — enable
+- `launchctl unload ...` — disable
+- `launchctl list | grep nfldb` — check status
+
+**Team refresh policy**: Only updates `latest_team` when Sleeper shows a new team. Never nulls out teams — retired/FA players keep their last team. Sleeper is the controlling source (94.7% coverage, free, no auth, fast FA updates).
 
 ## Database Schema
 
@@ -238,6 +311,193 @@ Daily snapshots allow ADP tracking over time. Each day's fetch creates new rows 
 
 Synced from Google Sheet via Google Apps Script. Full replace (delete + insert) on each push.
 
+#### `dynasty_value_history`
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text | FK → players, part of PK |
+| `date` | date | Date of the value change, part of PK |
+| `old_value` | numeric | Previous trade value (nullable) |
+| `new_value` | numeric | Updated trade value (nullable) |
+| `comment` | text | Editorial comment explaining the change (nullable) |
+
+Synced from Google Sheet via Apps Script (`dynasty_value_history_sync.js`). Full replace on each push. Player names resolved via normalized name matching against Supabase players table.
+
+#### `dynasty_pick_values`
+| Column | Type | Notes |
+|--------|------|-------|
+| `year` | integer | Draft year (2027, 2028), part of PK |
+| `round` | integer | 1-4, part of PK |
+| `tier` | text | 'early', 'mid', 'late', or 'random', part of PK. CHECK constraint enforced |
+| `value` | numeric | 1QB dynasty trade value (NOT NULL) |
+| `sf_value` | numeric | Superflex dynasty trade value (nullable) |
+
+32 rows (2 years × 4 rounds × 4 tiers). Manually maintained — values change rarely. No Apps Script sync; update via SQL when needed.
+
+#### `positional_model_coefficients`
+| Column | Type | Notes |
+|--------|------|-------|
+| `position` | text PK | 'QB', 'RB', 'TE', or 'WR'. CHECK constraint enforced |
+| `intercept` | numeric | Model intercept |
+| `league_size` | numeric | Coefficient for league size (6-16) |
+| `num_rb` | numeric | Coefficient for number of RB starter slots |
+| `num_wr` | numeric | Coefficient for number of WR starter slots |
+| `num_te` | numeric | Coefficient for number of TE starter slots |
+| `num_fl` | numeric | Coefficient for number of FLEX slots |
+| `num_sf` | numeric | Coefficient for superflex slot (0 or 1) |
+| `per_reception` | numeric | Coefficient for PPR value |
+| `rb_ppr_prem` | numeric | Coefficient for RB PPR premium (RB PPR - base PPR) |
+| `wr_ppr_prem` | numeric | Coefficient for WR PPR premium |
+| `te_ppr_prem` | numeric | Coefficient for TE PPR premium (TEP - base PPR) |
+| `per_passing_td` | numeric | Coefficient for points per passing TD |
+| `per_rushing_first_down` | numeric | Coefficient for points per rushing first down |
+| `per_receiving_first_down` | numeric | Coefficient for points per receiving first down |
+| `per_carry` | numeric | Coefficient for points per carry |
+
+Linear model coefficients extracted from original R multivariate regression (`mlm`). Predicts positional value share (% of total fantasy points above replacement) given league settings. 4 rows, 15 numeric columns.
+
+**Usage**: `predicted_share = intercept + coef₁×x₁ + ... + coef₁₄×x₁₄`, then `multiplier = baseline_share / predicted_share`.
+
+#### `positional_model_baselines`
+| Column | Type | Notes |
+|--------|------|-------|
+| `format` | text PK | '1qb' or 'sf'. CHECK constraint enforced |
+| `qb_share` | numeric | QB % of total value above replacement |
+| `rb_share` | numeric | RB % |
+| `te_share` | numeric | TE % |
+| `wr_share` | numeric | WR % |
+
+Default positional value shares that dynasty values are calibrated to. 1QB base: 12-team, full PPR, 4pt passing TD, 2RB/3WR/1TE/1FLEX. SF base: same + superflex slot. When user settings match baseline, multipliers = 1.0.
+
+#### `colleges`
+| Column | Type | Notes |
+|--------|------|-------|
+| `school` | text PK | School name (e.g., "Alabama", "Ole Miss", "NC State") |
+| `mascot` | text | Team mascot (e.g., "Crimson Tide") |
+| `abbreviation` | text | Short abbreviation (e.g., "ALA") |
+| `conference` | text | Conference name (e.g., "SEC") |
+| `division` | text | Conference division (e.g., "West") |
+| `color` | text | Primary hex color |
+| `alt_color` | text | Secondary hex color |
+| `logo` | text | ESPN logo URL (light background) |
+| `logo_dark` | text | ESPN logo URL (dark background) |
+
+738 schools from ESPN. Join via `players.college = colleges.school`. Player college names normalized to match (Ole Miss not Mississippi, NC State not North Carolina State, Miami not Miami (FL), BYU not Brigham Young).
+
+#### `player_projections`
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text | FK → players |
+| `source` | text | Projection source (e.g., "fbg") |
+| `year` | integer | Season year |
+| `season_type` | text | "regular" (default) |
+| `games` | numeric | Projected games |
+| `pass_att` | numeric | Pass attempts |
+| `pass_cmp` | numeric | Pass completions |
+| `pass_yds` | numeric | Pass yards |
+| `pass_td` | numeric | Pass TDs |
+| `pass_int` | numeric | Interceptions |
+| `pass_sck` | numeric | Sacks |
+| `pass_first_downs` | numeric | Passing first downs |
+| `rush_att` | numeric | Rush attempts |
+| `rush_yds` | numeric | Rush yards |
+| `rush_td` | numeric | Rush TDs |
+| `rush_first_downs` | numeric | Rushing first downs |
+| `targets` | numeric | Receiving targets |
+| `receptions` | numeric | Receptions |
+| `rec_yds` | numeric | Receiving yards |
+| `rec_td` | numeric | Receiving TDs |
+| `rec_first_downs` | numeric | Receiving first downs |
+| `fumbles_lost` | numeric | Fumbles lost |
+| `half_ppr_pts` | numeric | Calculated half-PPR fantasy points |
+| PK | | (player_id, source, year, season_type) |
+
+#### `teams`
+| Column | Type | Notes |
+|--------|------|-------|
+| `team_abbr` | text PK | nflreadr standard abbreviation (e.g., LA not LAR for Rams) |
+| `team_name` | text NOT NULL | Full name (e.g., "Los Angeles Rams") |
+| `team_nick` | text | Nickname (e.g., "Rams") |
+| `team_conf` | text | AFC or NFC |
+| `team_division` | text | e.g., "NFC West" |
+| `team_color` | text | Primary hex color |
+| `team_color2` | text | Secondary hex color |
+| `team_color3` | text | Tertiary hex color |
+| `team_color4` | text | Quaternary hex color |
+| `team_logo_wikipedia` | text | Wikipedia logo URL |
+| `team_logo_espn` | text | ESPN logo URL |
+| `team_wordmark` | text | Team wordmark image URL |
+| `team_conference_logo` | text | Conference logo URL |
+| `team_league_logo` | text | League logo URL |
+| `team_logo_squared` | text | Squared logo URL |
+| `team_id` | text | nflreadr numeric team ID |
+
+No FK from `players.latest_team` — too rigid for FA/NULL/historical values.
+
+#### `team_game_stats`
+
+One row per team per regular-season game (2016-2025). PPR variants are **Postgres generated columns** — auto-computed from standard FP + receptions. Apps just SELECT the column they need.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `game_id` | text | nflreadr format: "2024_01_KC_BAL" |
+| `season` | integer | |
+| `week` | integer | |
+| `team` | text | Current nflreadr abbreviation (OAK→LV, SD→LAC) |
+| `opponent` | text | |
+| `location` | text | 'home' or 'away' |
+| `team_score` | integer | |
+| `opp_score` | integer | |
+| `spread` | numeric | Standard convention: negative = this team favored |
+| `total_line` | numeric | Over/under |
+| `implied_total` | numeric | Vegas-implied team scoring total |
+| `pass_att`..`rec_td` | integer | Raw team offensive stats (12 columns) |
+| `off_pass_fp` | numeric | Passing FP (same across all scoring formats) |
+| `off_rush_fp` | numeric | Rushing FP (same across all scoring formats) |
+| `off_recv_fp` | numeric | Receiving FP (standard, no reception bonus) |
+| `off_total_fp` | numeric | Total team FP (standard) |
+| `off_recv_fp_hppr` | numeric | **Generated**: `off_recv_fp + 0.5 * receptions` |
+| `off_recv_fp_ppr` | numeric | **Generated**: `off_recv_fp + 1.0 * receptions` |
+| `off_total_fp_hppr` | numeric | **Generated**: `off_total_fp + 0.5 * receptions` |
+| `off_total_fp_ppr` | numeric | **Generated**: `off_total_fp + 1.0 * receptions` |
+| `qb_fp`, `qb_rec` | numeric, integer | QB standard FP + receptions |
+| `rb_fp`, `rb_rec` | numeric, integer | RB standard FP + receptions |
+| `wr_fp`, `wr_rec` | numeric, integer | WR standard FP + receptions |
+| `te_fp`, `te_rec` | numeric, integer | TE standard FP + receptions |
+| `{pos}_fp_hppr` | numeric | **Generated**: `{pos}_fp + 0.5 * {pos}_rec` (×4 positions) |
+| `{pos}_fp_ppr` | numeric | **Generated**: `{pos}_fp + 1.0 * {pos}_rec` (×4 positions) |
+| `def_pass_fp`..`def_total_fp` | numeric | Defensive FP allowed by category (standard) |
+| `def_receptions` | integer | Opponent receptions (for generating PPR) |
+| `def_recv_fp_hppr/ppr` | numeric | **Generated**: defensive receiving PPR variants |
+| `def_total_fp_hppr/ppr` | numeric | **Generated**: defensive total PPR variants |
+| `def_{pos}_fp`, `def_{pos}_rec` | numeric, integer | Defensive positional FP allowed (×4 positions) |
+| `def_{pos}_fp_hppr/ppr` | numeric | **Generated**: defensive positional PPR variants (×4 positions) |
+| PK | | (game_id, team) |
+
+**Scoring formula**: `half_ppr = standard + 0.5 × receptions`, `full_ppr = standard + 1.0 × receptions`. Passing and rushing FP are identical across all formats — only receiving (and totals) change.
+
+#### `player_stats`
+
+One row per player per regular-season week (2016-2025). PPR variants are **Postgres generated columns**. Loaded from nflreadr `load_player_stats()` via gsis_id → sportradar_id mapping.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text | FK → players, part of PK |
+| `season` | integer | Part of PK |
+| `week` | integer | Part of PK |
+| `team` | text | NFL team abbreviation for that game |
+| `position` | text | Position group (QB, RB, WR, TE) |
+| `opponent` | text | Opponent team abbreviation |
+| `pass_att`..`pass_2pt` | integer | 12 passing stat columns |
+| `rush_att`..`rush_2pt` | integer | 6 rushing stat columns |
+| `targets`..`rec_2pt` | integer | 9 receiving stat columns |
+| `special_teams_tds` | integer | Special teams touchdowns |
+| `fantasy_points` | numeric | Standard scoring (no reception bonus) |
+| `fantasy_points_hppr` | numeric | **Generated**: `fantasy_points + 0.5 * receptions` |
+| `fantasy_points_ppr` | numeric | **Generated**: `fantasy_points + 1.0 * receptions` |
+| PK | | (player_id, season, week) |
+
+Only includes players that exist in the `players` table (FK enforced). ~59K rows from 1,748 DB players out of ~166K total nflreadr rows.
+
 #### `player_seasons`
 | Column | Type | Notes |
 |--------|------|-------|
@@ -245,6 +505,15 @@ Synced from Google Sheet via Google Apps Script. Full replace (delete + insert) 
 | `year` | integer | |
 | `team` | text | NFL team abbreviation for that season |
 | PK | | (player_id, year) |
+
+#### `player_notes`
+| Column | Type | Notes |
+|--------|------|-------|
+| `player_id` | text PK | FK → players |
+| `writeup` | text NOT NULL | Dynasty-focused player writeup (neutral tone, no buy/sell tips) |
+| `updated_at` | timestamptz | Defaults to now() |
+
+314 players with writeups (all players with dynasty value >= 2). Managed via `data/writeups/player_writeups.yaml` → `push_writeups.py`. Full replace on each push.
 
 ### Views
 
@@ -262,6 +531,16 @@ JOIN league_teams lt ON dp.league_id = lt.league_id AND dp.team_id = lt.team_id
 LEFT JOIN player_seasons ps ON dp.player_id = ps.player_id AND dp.year = ps.year;
 ```
 
+#### `team_season_stats`
+View aggregating `team_game_stats` by (team, season). Per-game averages and standard deviations for all scoring formats. ~320 rows (32 teams × 10 seasons). Uses `security_invoker = true`.
+
+#### `player_season_stats`
+View aggregating `player_stats` by (player_id, team, season). Joins to `players` for first/last name. Includes season stat totals, FPG in all 3 scoring formats, and week-to-week SD. Groups by team so traded players get separate rows per team. Uses `security_invoker = true`.
+
+Key columns: `player_id`, `first_name`, `last_name`, `position`, `team`, `season`, `games`, `pass_yds`, `pass_td`, `rush_yds`, `rush_td`, `receptions`, `rec_yds`, `rec_td`, `fantasy_points`/`_hppr`/`_ppr`, `fpg`/`_hppr`/`_ppr`, `fp_sd`/`_hppr`
+
+Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_fpg`, `off_recv_fpg`/`_hppr`/`_ppr`, `off_total_sd`, `qb_fpg`/`_hppr`/`_ppr`, `rb_fpg`/`_hppr`/`_ppr`, `wr_fpg`/`_hppr`/`_ppr`, `te_fpg`/`_hppr`/`_ppr`, `def_total_fpg`/`_hppr`/`_ppr`, `def_{pos}_fpg`/`_hppr`/`_ppr`, `off_*_sd`, `def_*_sd`
+
 ### Indexes
 
 | Index | Table | Columns |
@@ -277,6 +556,13 @@ LEFT JOIN player_seasons ps ON dp.player_id = ps.player_id AND dp.year = ps.year
 | `idx_adp_sources_source_year_date` | adp_sources | (source, year, date DESC) |
 | `idx_players_dan_id` | players | (dan_id) WHERE dan_id IS NOT NULL (unique partial) |
 | `idx_dynasty_values_updated` | dynasty_values | (updated_at) |
+| `idx_player_projections_source_year` | player_projections | (source, year) |
+| `idx_tgs_team_season` | team_game_stats | (team, season) |
+| `idx_tgs_season_week` | team_game_stats | (season, week) |
+| `idx_tgs_opponent_season` | team_game_stats | (opponent, season) |
+| `idx_ps_season_week` | player_stats | (season, week) |
+| `idx_ps_team_season` | player_stats | (team, season) |
+| `idx_ps_position_season` | player_stats | (position, season) |
 
 ### RLS
 
@@ -304,8 +590,23 @@ All tables: RLS enabled. Policies:
 12. `create_dynasty_values` — Dynasty values table with RLS (anon SELECT only)
 13. `add_height_weight_to_players` — height (text) and weight (integer) columns on players
 14. `add_date_to_adp_sources` — date column + new PK (player_id, source, year, date) for daily tracking
+15. `create_player_projections` — Season projections table with RLS (anon SELECT only)
+16. `create_teams` — 32-team reference table (abbr, name, conf, division, colors, logos) with RLS
+17. `normalize_team_abbreviations` — UPDATE players SET latest_team = 'LA' WHERE latest_team = 'LAR'
+18. `create_team_game_stats` — Team game stats with 24 generated columns for PPR variants + RLS + indexes
+19. `create_team_season_stats_view` — Season-level aggregates view (security_invoker)
+20. `create_player_stats` — Player weekly stats with 2 generated PPR columns + RLS + indexes
+21. `create_player_season_stats_view` — Player season aggregates view (security_invoker)
+22. `create_dynasty_value_history` — Change log table for dynasty value changes + RLS + date index
+23. `create_dynasty_pick_values` — Future draft pick trade values (2027-2028, 4 rounds × 4 tiers) + RLS
+24. `create_positional_model_tables` — Coefficients + baselines for positional value adjustment model + RLS
+25. `create_colleges` — College reference table (738 schools with logos, mascots, colors, conferences) + RLS
+26. `create_player_notes` — Player writeup table (PK player_id, FK → players) + RLS (anon SELECT only)
 
 Applied via direct SQL (not tracked in migration system):
+- College name normalization — UPDATE players: Mississippi→Ole Miss, North Carolina State→NC State, Pittsburg→Pittsburgh, Virgina Tech→Virginia Tech, Miami (FL)→Miami, Brigham Young→BYU
+
+Applied via direct SQL (not tracked in migration system, pre-existing):
 - Player ID columns — 18 new ID columns on players table
 - `adp_sources` table — Multi-source ADP table with RLS (SELECT + INSERT for anon)
 
@@ -313,16 +614,26 @@ Applied via direct SQL (not tracked in migration system):
 
 | Table | Rows |
 |-------|------|
-| `players` | 1,749 |
+| `players` | 1,748 |
 | `leagues` | 2,629 |
 | `league_teams` | 31,548 |
 | `adp` | 5,339 |
 | `draft_picks` | 618,856 |
 | `player_seasons` | 6,060 |
-| `adp_sources` | 1,431 |
-| `dynasty_values` | 633 |
+| `adp_sources` | ~2,000+ (growing daily) |
+| `dynasty_values` | 704 |
+| `player_projections` | 443 |
+| `teams` | 32 |
+| `team_game_stats` | 5,278 |
+| `player_stats` | 59,328 |
+| `dynasty_value_history` | 706 |
+| `dynasty_pick_values` | 32 |
+| `positional_model_coefficients` | 4 |
+| `positional_model_baselines` | 2 |
+| `colleges` | 738 |
+| `player_notes` | 314 |
 
-### Player ID Coverage (1,749 players)
+### Player ID Coverage (1,748 players)
 
 | ID Column | Count | Coverage |
 |-----------|-------|----------|
@@ -355,7 +666,7 @@ Applied via direct SQL (not tracked in migration system):
 
 | Source | Year | Dates Tracked | Latest Row Count |
 |--------|------|---------------|-----------------|
-| `underdog` | 2026 | 2 (Feb 16-18) | 1,431 total |
+| `underdog` | 2026 | 3+ (daily since Feb 16) | ~2,000+ (growing daily) |
 
 ## Data Import Files
 
@@ -365,6 +676,8 @@ Located in `data/imports/` (git-ignored):
 - `drafters_players.csv` — Drafters platform player list (1,999 players)
 - `fbg_crosswalk.csv` — FBG ID → SportsDataIO ID mapping (1,867 rows)
 - `dynasty_values.csv` — Exported Google Sheet for bootstrapping dan_id + initial dynasty values
+- `rookie_birthdates_2026.csv` — 77 rookie birthdates from DLF devy age table (manually compiled)
+- `sportsdata_rookies_2026.json` — Cached SportsData.io Rookies/2026 API response (407 rookies)
 
 ## DFS Analysis Findings (from exploration.Rmd)
 
@@ -391,20 +704,10 @@ Located in `data/imports/` (git-ignored):
 ## Planned Future Tables
 
 ### Team Tables (Phase 3)
-- `teams` — NFL team reference (abbr, name, conference, division, logos, colors)
-- `schedules` — Game schedule with scores, spreads, totals
-- `team_games` — Game-level team stats
-- `team_seasons` — Season-level aggregates
+- `schedules` — Game schedule with scores, spreads, totals (standalone, beyond what's in team_game_stats)
 - `team_projections` — FBG/SportsData team projections
 
-### Player Enrichment (Phase 4)
-- `player_stats` — Weekly/seasonal stats (from nflreadr)
-- `player_projections` — Weekly projections (from FBG API, full season 2026)
-- `player_notes` — Written content per player
-
 ### Other Planned Data
-- Biographical enrichment (height, weight, photos from SportsData.io)
-- Headshots (from SportsData.io `PhotoUrl`, `UsaTodayHeadshotNoBackgroundUrl`)
 - DraftKings and Drafters ADP into `adp_sources`
 - 2026 season simulation engine
 
@@ -429,3 +732,10 @@ Located in `data/imports/` (git-ignored):
 - nflreadr `spread_line`: positive = home team favored (NOT standard betting convention)
 - nflreadr `clean_homeaway()` does NOT transform `spread_line` — same value for both rows
 - ggplot `scale_color_manual` labels: use NAMED vector to avoid alphabetical ordering bug
+- nflreadr uses `LA` for the Rams (not `LAR`). Our `normalize_team()` in shared.py maps LAR→LA. All `players.latest_team` values now use nflreadr standard abbreviations
+- `team_game_stats` PPR columns are Postgres generated columns — do NOT include them in INSERT/POST payloads. The Python loader excludes them via `GENERATED_COLS` set
+- `team_game_stats.spread` uses standard betting convention (negative = favored). nflreadr's `spread_line` uses positive = home favored — the R script converts
+- `team_game_stats` historical teams normalized to current abbreviations (OAK→LV, SD→LAC). Use `team` column directly to query across years
+- NFFC API `"number"` field counts drafts across ALL contest types, not just Rotowire OC — `build_clean_dataset.py` recalculates `times_drafted` from actual `draft_picks`
+- Supabase REST API silently caps results at 1000 rows even with `limit=2000` — use `Prefer: count=exact` header + `content-range` for accurate counts
+- Duplicate player records can exist when same player has both sportradar UUID and Underdog UUID — merge by moving FK references before deleting

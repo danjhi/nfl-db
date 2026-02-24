@@ -18,7 +18,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(__file__))
+_script_dir = os.path.dirname(os.path.abspath(__file__)) if os.path.exists(__file__) else os.path.join("scripts", "ids")
+sys.path.insert(0, _script_dir)
 from shared import (
     SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_KEY,
     normalize_team,

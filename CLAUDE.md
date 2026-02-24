@@ -668,6 +668,45 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 |--------|------|---------------|-----------------|
 | `underdog` | 2026 | 3+ (daily since Feb 16) | ~2,000+ (growing daily) |
 
+## Supabase Storage
+
+### Buckets
+
+| Bucket | Public | Purpose |
+|--------|--------|---------|
+| `headshots` | Yes | Player headshot images (uploaded via `upload_rookie_headshots.py`) |
+| `assets` | Yes | Shared icons, logos, and badges for use across apps |
+
+### Assets (`assets/icons/`)
+
+Base URL: `https://twfzcrodldvhpfaykasj.supabase.co/storage/v1/object/public/assets/icons/`
+
+Each icon is available in SVG (`svg/{name}.svg`) and PNG at two sizes (`png/{name}@128.png`, `png/{name}@256.png`).
+
+| Icon | File name | Description |
+|------|-----------|-------------|
+| Rookie | `rookie` | Gold shield with serif "R" — first/second-year players |
+| Cornerstone | `cornerstone` | Gold shield with star — top-tier dynasty assets |
+| Rising | `rising` | Green circle with up arrow — value trending up |
+| Falling | `falling` | Red circle with down arrow — value trending down |
+| Injury | `injury` | Red circle with medical cross — injured/IR |
+| Free Agent | `free-agent` | Gray circle with "FA" — unsigned players |
+| Draft Pick | `draft-pick` | Purple card with star — future draft picks |
+| QB | `pos-qb` | Red circle — quarterback |
+| RB | `pos-rb` | Blue circle — running back |
+| WR | `pos-wr` | Green circle — wide receiver |
+| TE | `pos-te` | Orange circle — tight end |
+
+**Usage example**: `{BASE_URL}/svg/rookie.svg` or `{BASE_URL}/png/pos-qb@256.png`
+
+### Logos (`assets/logos/`)
+
+| File | Description |
+|------|-------------|
+| `fbg-mascot.png` | Footballguys "Black-Eyed Joe" mascot (hi-res) |
+| `fbg-logo-black.png` | Footballguys logo (black, for light backgrounds) |
+| `fbg-logo-white.png` | Footballguys logo (white, for dark backgrounds) |
+
 ## Data Import Files
 
 Located in `data/imports/` (git-ignored):

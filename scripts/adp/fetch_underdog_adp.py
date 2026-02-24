@@ -20,7 +20,8 @@ import urllib.error
 import urllib.request
 
 # Add ids dir so shared imports work
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ids"))
+_script_dir = os.path.dirname(os.path.abspath(__file__)) if os.path.exists(__file__) else os.path.join("scripts", "adp")
+sys.path.insert(0, os.path.join(_script_dir, "..", "ids"))
 from shared import (
     SUPABASE_URL,
     SUPABASE_KEY,

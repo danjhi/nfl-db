@@ -61,7 +61,7 @@ def parse_yaml_simple(path):
                 val = stripped.split("writeup:", 1)[1].strip()
                 # Strip surrounding quotes
                 if val.startswith('"') and val.endswith('"'):
-                    val = val[1:-1]
+                    val = val[1:-1].replace('\\"', '"')
                 elif val.startswith("'") and val.endswith("'"):
                     val = val[1:-1]
                 # Handle YAML block scalar indicators

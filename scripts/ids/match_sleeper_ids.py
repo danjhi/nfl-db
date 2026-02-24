@@ -70,10 +70,14 @@ def main():
     db_by_pid = {p["player_id"] for p in db_players}
     by_name_pos, by_name = build_player_lookup(db_players)
 
-    matched = {}
+    matched = {}          # player_id → {col: val, ...}
+    match_method = {}      # player_id → "sportradar" | "name"
     unmatched = []
     match_by_sr = 0
     match_by_name = 0
+
+    # Build reverse lookup: player_id → position (for name-only fallback check)
+    db_pos = {p["player_id"]: (p.get("position") or "").upper() for p in db_players}
 
     for p in sleeper_players:
         sr_id = (p.get("sportradar_id") or "").strip()
@@ -87,15 +91,24 @@ def main():
 
         # Strategy 1: Direct match by sportradar_id → our player_id PK
         player_id = None
+        method = None
         if sr_id and sr_id in db_by_pid:
             player_id = sr_id
+            method = "sportradar"
             match_by_sr += 1
         else:
-            # Strategy 2: Name+position match
+            # Strategy 2: Name+position match (most reliable name fallback)
             player_id = by_name_pos.get((norm, pos))
             if not player_id:
-                player_id = by_name.get(norm)
+                # Strategy 3: Name-only match — verify position compatibility
+                candidate = by_name.get(norm)
+                if candidate:
+                    db_player_pos = db_pos.get(candidate, "")
+                    if db_player_pos == pos:
+                        player_id = candidate
+                    # Skip if positions don't match — likely a different player
             if player_id:
+                method = "name"
                 match_by_name += 1
 
         if player_id:
@@ -105,10 +118,17 @@ def main():
                 if val:
                     updates[db_col] = str(val)
             if updates:
+                prev_method = match_method.get(player_id)
                 if player_id not in matched:
+                    # First match for this player
                     matched[player_id] = updates
+                    match_method[player_id] = method
+                elif method == "sportradar" and prev_method == "name":
+                    # Sportradar match overrides a previous name-based match
+                    matched[player_id] = updates
+                    match_method[player_id] = method
                 else:
-                    # Don't overwrite existing values
+                    # Don't overwrite existing values (same quality or lower)
                     for k, v in updates.items():
                         if k not in matched[player_id]:
                             matched[player_id][k] = v

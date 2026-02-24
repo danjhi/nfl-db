@@ -1,0 +1,1631 @@
+---
+title: "NFL Database Schema Audit"
+subtitle: "What we have, how it connects, and what's next"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gt)
+library(reactable)
+library(scales)
+library(RColorBrewer)
+
+# ── Supabase connection via REST API ──────────────────────────────────────────
+# Load .env
+env <- readLines("../.env", warn = FALSE)
+env_vars <- setNames(
+  sub("^[^=]+=", "", env[grepl("=", env) & !grepl("^#", env)]),
+  sub("=.*$", "", env[grepl("=", env) & !grepl("^#", env)])
+)
+
+SUPABASE_URL <- "https://twfzcrodldvhpfaykasj.supabase.co"
+ANON_KEY <- trimws(env_vars[["SUPABASE_ANON_KEY"]])
+
+# Helper: query Supabase REST API and return a data frame
+supabase_query <- function(table, select = "*", filters = "", limit = NULL,
+                           order = NULL, count = FALSE) {
+  url <- paste0(SUPABASE_URL, "/rest/v1/", table, "?select=", select)
+  if (nzchar(filters)) url <- paste0(url, "&", filters)
+  if (!is.null(order)) url <- paste0(url, "&order=", order)
+  if (!is.null(limit)) url <- paste0(url, "&limit=", limit)
+
+  hdrs <- c(apikey = ANON_KEY, Authorization = paste("Bearer", ANON_KEY))
+  if (count) hdrs <- c(hdrs, Prefer = "count=exact")
+
+  resp <- GET(url, add_headers(.headers = hdrs))
+  if (count) {
+    range_header <- headers(resp)[["content-range"]]
+    if (is.null(range_header)) return(NA_integer_)
+    return(as.integer(sub(".*/", "", range_header)))
+  }
+  fromJSON(content(resp, "text", encoding = "UTF-8"), flatten = FALSE)
+}
+
+# Helper: get exact row count for a table
+supabase_count <- function(table, filters = "") {
+  supabase_query(table, select = "*", filters = filters, limit = 1, count = TRUE)
+}
+
+# Theme for plots
+theme_nfl <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(color = "gray40"),
+    panel.grid.minor = element_blank()
+  )
+theme_set(theme_nfl)
+```
+
+# The Big Picture
+
+This database powers multiple NFL and fantasy football applications. The core idea is: **store everything once, use it everywhere**. Player IDs, draft history, dynasty values, ADP tracking, team stats, and projections all live here so individual apps don't need to maintain their own data.
+
+## Entity Relationship Diagram {.tabset}
+
+Here's how all the tables connect. The **bolded** tables are the most important — they're the ones you'll join to most often.
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+
+<pre class="mermaid">
+erDiagram
+    PLAYERS ||--o{ DRAFT_PICKS : player_id
+    PLAYERS ||--o{ ADP : player_id
+    PLAYERS ||--o{ ADP_SOURCES : player_id
+    PLAYERS ||--o{ PLAYER_SEASONS : player_id
+    PLAYERS ||--o{ DYNASTY_VALUES : player_id
+    PLAYERS ||--o{ PLAYER_PROJECTIONS : player_id
+    PLAYERS ||--o{ PLAYER_STATS : player_id
+    LEAGUES ||--o{ LEAGUE_TEAMS : league_id
+    LEAGUES ||--o{ DRAFT_PICKS : league_id
+    LEAGUE_TEAMS ||--o{ DRAFT_PICKS : composite_fk
+    TEAMS ||--o{ TEAM_GAME_STATS : team_abbr
+
+    PLAYERS {
+        string player_id PK
+        string first_name
+        string last_name
+        string position
+        string latest_team
+        string dan_id
+        string headshot_url
+    }
+    LEAGUES {
+        int league_id PK
+        int year
+        string name
+    }
+    LEAGUE_TEAMS {
+        int league_id PK
+        int team_id PK
+        int draft_order
+        int league_rank
+    }
+    DRAFT_PICKS {
+        int league_id PK
+        int overall_pick PK
+        string player_id FK
+        int round
+        int pick_in_round
+    }
+    ADP {
+        string player_id PK
+        int year PK
+        float adp
+        int times_drafted
+    }
+    ADP_SOURCES {
+        string player_id PK
+        string source PK
+        int year PK
+        string date PK
+        float adp
+    }
+    PLAYER_SEASONS {
+        string player_id PK
+        int year PK
+        string team
+    }
+    DYNASTY_VALUES {
+        string player_id PK
+        float value
+        float sf_value
+    }
+    PLAYER_PROJECTIONS {
+        string player_id PK
+        string source PK
+        int year PK
+        float half_ppr_pts
+    }
+    TEAMS {
+        string team_abbr PK
+        string team_name
+        string team_conf
+        string team_division
+    }
+    TEAM_GAME_STATS {
+        string game_id PK
+        string team PK
+        int season
+        int week
+        float off_total_fp
+        float rb_fp_hppr
+    }
+    PLAYER_STATS {
+        string player_id PK
+        int season PK
+        int week PK
+        string team
+        float fantasy_points
+        float fantasy_points_hppr
+    }
+</pre>
+
+### How to read this
+
+- **Lines** show which tables connect (foreign keys)
+- **`||--o{`** means "one to many" — one player has many draft picks, one league has many teams
+- **PK** = primary key (uniquely identifies each row)
+- **FK** = foreign key (points to another table's PK)
+
+The **`players`** table is the hub — almost everything connects through it via `player_id`.
+
+# Table Inventory
+
+Let's see what we're working with. Each table has a specific purpose.
+
+```{r table-inventory}
+tables <- tribble(
+  ~table, ~description, ~pk,
+  "players", "Central player registry (1 row per player)", "player_id",
+  "leagues", "NFFC league metadata (2018-2025)", "league_id",
+  "league_teams", "Teams within each league + standings", "league_id, team_id",
+  "draft_picks", "Every NFFC draft pick (2018-2025)", "league_id, overall_pick",
+  "adp", "NFFC Rotowire OC ADP by year", "player_id, year",
+  "adp_sources", "Multi-platform ADP with daily snapshots", "player_id, source, year, date",
+  "player_seasons", "Which team each player was on each year", "player_id, year",
+  "dynasty_values", "Personal dynasty trade values", "player_id",
+  "player_projections", "Season stat projections (FBG)", "player_id, source, year, season_type",
+  "teams", "NFL team reference (logos, colors, division)", "team_abbr",
+  "team_game_stats", "Team-level fantasy points per game (2016-2025)", "game_id, team",
+  "player_stats", "Player-level weekly stats + FP (2016-2025)", "player_id, season, week"
+)
+
+# Get row counts
+counts <- sapply(tables$table, function(t) supabase_count(t))
+tables$rows <- as.integer(counts)
+
+tables |>
+  arrange(desc(rows)) |>
+  gt() |>
+  cols_label(
+    table = "Table", description = "What It Stores",
+    pk = "Primary Key", rows = "Rows"
+  ) |>
+  fmt_number(columns = rows, decimals = 0) |>
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = cells_body(columns = table)
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#f0f7ff"),
+    locations = cells_body(rows = table %in% c("players", "team_game_stats", "player_stats", "draft_picks"))
+  ) |>
+  tab_footnote("Highlighted tables are the largest / most commonly joined.")
+```
+
+```{r row-count-chart, fig.height=5}
+tables |>
+  mutate(table = reorder(table, rows)) |>
+  ggplot(aes(x = table, y = rows, fill = rows > 1000)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = comma(rows)), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.2))) +
+  scale_fill_manual(values = c("TRUE" = "#2166ac", "FALSE" = "#92c5de")) +
+  labs(title = "Row Counts by Table",
+       subtitle = "draft_picks dominates — 8 years of NFFC draft data",
+       x = NULL, y = "Rows")
+```
+
+# Table Deep Dives
+
+## Players — The Hub
+
+Every other table connects through `players.player_id`. This table stores names, positions, team, and **24 cross-platform ID columns** so you can link to any external data source.
+
+```{r players-sample}
+players_sample <- supabase_query(
+  "players",
+  select = "player_id,first_name,last_name,position,latest_team,draft_year,headshot_url,dan_id",
+  filters = "position=in.(QB,RB,WR,TE)&dan_id=not.is.null",
+  order = "dan_id.asc",
+  limit = 10
+)
+
+players_sample |>
+  mutate(
+    headshot = ifelse(!is.na(headshot_url) & nzchar(headshot_url),
+                      paste0('<img src="', headshot_url, '" height="40">'), ""),
+    player_id = substr(player_id, 1, 12)
+  ) |>
+  select(headshot, first_name, last_name, position, latest_team, draft_year, dan_id) |>
+  gt() |>
+  fmt_markdown(columns = headshot) |>
+  cols_label(headshot = "", first_name = "First", last_name = "Last",
+             position = "Pos", latest_team = "Team", draft_year = "Draft",
+             dan_id = "Dan ID")
+```
+
+### Platform ID Coverage (Dynasty SF >= 1.0)
+
+```{r dv-setup}
+# Get dynasty player IDs (SF value >= 1) — used by all coverage chunks
+dv_players <- supabase_query(
+  "dynasty_values",
+  select = "player_id",
+  filters = "sf_value=gte.1",
+  limit = 1000
+)
+dv_player_ids <- dv_players$player_id
+total_dv <- length(dv_player_ids)
+```
+
+Coverage for the **`r total_dv` players with SF dynasty value >= 1.0** across the six key platforms:
+
+```{r id-coverage, fig.height=4}
+id_cols <- c("sleeper_id", "draftkings_id", "underdog_id",
+             "footballguys_id", "fantasy_data_id", "drafters_id")
+
+# Build the IN filter string
+in_filter <- paste0("player_id=in.(", paste0(dv_player_ids, collapse = ","), ")")
+
+# Count non-null for each ID column, scoped to dynasty players
+id_counts <- sapply(id_cols, function(col) {
+  supabase_count("players", filters = paste0(col, "=not.is.null&", in_filter))
+})
+
+id_coverage <- tibble(
+  id = names(id_counts),
+  count = unname(id_counts),
+  missing = total_dv - count,
+  pct = count / total_dv
+) |>
+  arrange(desc(pct))
+
+id_coverage |>
+  mutate(id = reorder(id, pct)) |>
+  ggplot(aes(x = id, y = pct, fill = pct)) +
+  geom_col() +
+  geom_text(aes(label = paste0(count, "/", total_dv, " (", percent(pct, 1), ")")),
+            hjust = -0.05, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = percent, limits = c(0, 1.15)) +
+  scale_fill_gradient(low = "#fdae61", high = "#2166ac", guide = "none") +
+  labs(title = "Platform ID Coverage (Dynasty SF >= 1.0)",
+       subtitle = paste0(total_dv, " players with SF dynasty value >= 1.0"),
+       x = NULL, y = "Coverage")
+```
+
+### Missing Player Details
+
+Who's missing from each platform? These are the specific edge cases to investigate.
+
+```{r id-missing, results='asis'}
+# Pull dynasty values and player details separately, then join
+dv_vals <- supabase_query(
+  "dynasty_values",
+  select = "player_id,sf_value",
+  filters = "sf_value=gte.1",
+  limit = 1000
+)
+
+player_details <- supabase_query(
+  "players",
+  select = "player_id,first_name,last_name,position,latest_team,sleeper_id,draftkings_id,underdog_id,footballguys_id,fantasy_data_id,drafters_id",
+  filters = in_filter,
+  limit = 1000
+)
+
+dv_flat <- dv_vals |>
+  inner_join(player_details, by = "player_id") |>
+  mutate(sf_value = as.numeric(sf_value))
+
+# Build one table per platform showing who's missing
+for (col in id_cols) {
+  missing <- dv_flat |>
+    filter(is.na(.data[[col]])) |>
+    select(first_name, last_name, position, latest_team, sf_value) |>
+    arrange(desc(sf_value))
+
+  platform <- gsub("_id$", "", col)
+  cat(paste0("\n#### Missing `", col, "` (", nrow(missing), " players)\n\n"))
+
+  if (nrow(missing) > 0) {
+    tbl <- missing |>
+      mutate(latest_team = ifelse(is.na(latest_team), "—", latest_team)) |>
+      gt() |>
+      cols_label(first_name = "First", last_name = "Last", position = "Pos",
+                 latest_team = "Team", sf_value = "SF Value")
+    print(htmltools::tagList(tbl))
+  } else {
+    cat("*All players covered.*\n\n")
+  }
+}
+```
+
+## Draft Picks + Leagues — NFFC History
+
+This is the original data that started the database. Every pick from every NFFC Rotowire Online Championship draft (2018-2025).
+
+```{r draft-overview}
+# Use count queries per year (avoids hitting REST API row limits)
+years <- 2018:2025
+league_overview <- tibble(
+  year = years,
+  leagues = sapply(years, function(y)
+    supabase_count("leagues", filters = paste0("year=eq.", y))),
+  picks = sapply(years, function(y)
+    supabase_count("draft_picks", filters = paste0("year=eq.", y)))
+) |>
+  mutate(avg_picks_per_league = round(picks / leagues))
+
+league_overview |>
+  gt() |>
+  cols_label(year = "Year", leagues = "Leagues", picks = "Picks",
+             avg_picks_per_league = "Picks/League") |>
+  fmt_number(columns = c(leagues, picks), decimals = 0)
+```
+
+### How draft data connects
+
+Here's an example of joining draft picks to player info — this is the most common query pattern:
+
+```{r draft-join-example}
+# Find one 2024 league to use as example
+sample_league <- supabase_query(
+  "leagues",
+  select = "league_id,name",
+  filters = "year=eq.2024",
+  limit = 1
+)
+
+top_picks <- supabase_query(
+  "draft_picks",
+  select = "overall_pick,round,pick_in_round,player_id,players(first_name,last_name,position,latest_team)",
+  filters = paste0("league_id=eq.", sample_league$league_id[1], "&overall_pick=lte.12"),
+  order = "overall_pick.asc",
+  limit = 12
+)
+
+top_picks |>
+  transmute(
+    pick = overall_pick,
+    round = round,
+    slot = pick_in_round,
+    player = paste(players$first_name, players$last_name),
+    position = players$position,
+    team = players$latest_team
+  ) |>
+  gt() |>
+  cols_label(pick = "Overall", round = "Rd", slot = "Slot",
+             player = "Player", position = "Pos", team = "Team") |>
+  tab_header(title = paste0("Top 12 Picks — 2024 (", sample_league$name[1], ")"))
+```
+
+> **Key concept**: Supabase REST API supports **embedded joins** — notice the
+> `players(first_name,last_name,...)` syntax in the select. This pulls related
+> data in a single request, no manual join needed. This is one of the most
+> powerful features for building apps.
+
+## ADP — Draft Position Trends
+
+Two ADP tables serve different purposes:
+
+| Table | Source | Granularity | Use Case |
+|-------|--------|-------------|----------|
+| `adp` | NFFC Rotowire OC | Annual (one row/player/year) | Historical ADP analysis, draft value |
+| `adp_sources` | Underdog (more coming) | Daily snapshots | ADP movement tracking, cross-platform comparison |
+
+```{r adp-trends, fig.height=6}
+# Top 10 players by ADP in 2024
+adp_top <- supabase_query(
+  "adp",
+  select = "player_id,year,adp,times_drafted,players(first_name,last_name,position)",
+  filters = "year=eq.2024",
+  order = "adp.asc",
+  limit = 15
+)
+
+adp_top |>
+  transmute(
+    player = paste(players$first_name, players$last_name),
+    position = players$position,
+    adp = round(adp, 1),
+    times_drafted = times_drafted
+  ) |>
+  gt() |>
+  cols_label(player = "Player", position = "Pos", adp = "ADP",
+             times_drafted = "Times Drafted") |>
+  tab_header(title = "Top 15 by NFFC ADP — 2024")
+```
+
+### ADP Movement (Underdog Daily Snapshots)
+
+The `adp_sources` table tracks ADP daily, so you can see how players move pre-draft:
+
+```{r adp-sources-dates}
+adp_dates <- supabase_query(
+  "adp_sources",
+  select = "source,date",
+  limit = 5000
+) |>
+  distinct() |>
+  count(source, name = "dates_tracked")
+
+adp_count <- supabase_count("adp_sources")
+
+cat(sprintf("**%s total ADP snapshots** across %s source(s) and %s date(s).\n\n",
+            comma(adp_count),
+            nrow(adp_dates),
+            sum(adp_dates$dates_tracked)))
+
+adp_dates |>
+  gt() |>
+  cols_label(source = "Source", dates_tracked = "Dates Tracked")
+```
+
+## Dynasty Values + Projections — Your Personal Layer
+
+These tables contain **your** valuations and expert projections.
+
+```{r dynasty-top}
+dv <- supabase_query(
+  "dynasty_values",
+  select = "value,sf_value,players(first_name,last_name,position,latest_team)",
+  order = "value.desc",
+  limit = 20
+)
+
+dv |>
+  transmute(
+    rank = row_number(),
+    player = paste(players$first_name, players$last_name),
+    position = players$position,
+    team = players$latest_team,
+    value_1qb = value,
+    value_sf = sf_value
+  ) |>
+  gt() |>
+  cols_label(rank = "#", player = "Player", position = "Pos", team = "Team",
+             value_1qb = "1QB Value", value_sf = "SF Value") |>
+  tab_header(title = "Top 20 Dynasty Values")
+```
+
+### FBG Season Projections
+
+```{r projections-sample}
+proj <- supabase_query(
+  "player_projections",
+  select = "half_ppr_pts,pass_yds,rush_yds,rec_yds,receptions,players(first_name,last_name,position)",
+  filters = "source=eq.fbg&year=eq.2026",
+  order = "half_ppr_pts.desc.nullslast",
+  limit = 20
+)
+
+proj |>
+  transmute(
+    rank = row_number(),
+    player = paste(players$first_name, players$last_name),
+    pos = players$position,
+    half_ppr = half_ppr_pts,
+    pass_yds = pass_yds,
+    rush_yds = rush_yds,
+    rec_yds = rec_yds,
+    rec = receptions
+  ) |>
+  gt() |>
+  cols_label(rank = "#", player = "Player", pos = "Pos", half_ppr = "Half-PPR Pts",
+             pass_yds = "Pass Yds", rush_yds = "Rush Yds",
+             rec_yds = "Rec Yds", rec = "Rec") |>
+  fmt_number(columns = c(half_ppr, pass_yds, rush_yds, rec_yds, rec), decimals = 0) |>
+  tab_header(title = "Top 20 FBG 2026 Projections (Half-PPR)")
+```
+
+## Teams — Reference + Logos
+
+```{r teams-display}
+teams <- supabase_query(
+  "teams",
+  select = "team_abbr,team_name,team_conf,team_division,team_logo_espn",
+  order = "team_conf,team_division,team_name"
+)
+
+teams |>
+  mutate(
+    logo = paste0('<img src="', team_logo_espn, '" height="30">')
+  ) |>
+  select(logo, team_abbr, team_name, team_conf, team_division) |>
+  gt() |>
+  fmt_markdown(columns = logo) |>
+  cols_label(logo = "", team_abbr = "Abbr", team_name = "Name",
+             team_conf = "Conf", team_division = "Division")
+```
+
+## Team Game Stats — The Fantasy Engine
+
+This is the newest and most powerful table. **5,278 game-level rows** with fantasy points
+pre-calculated in three scoring formats, broken down by category and position.
+
+The key insight: **PPR columns are auto-computed by Postgres**. We store standard FP +
+receptions, and the database generates half-PPR and full-PPR variants automatically:
+
+| Format | Formula | Example Column |
+|--------|---------|----------------|
+| Standard | Base FP (no reception bonus) | `rb_fp` |
+| Half-PPR | Standard + 0.5 per reception | `rb_fp_hppr` |
+| Full PPR | Standard + 1.0 per reception | `rb_fp_ppr` |
+
+```{r team-stats-example}
+# KC 2024 — first 5 weeks
+kc_games <- supabase_query(
+  "team_game_stats",
+  select = "week,opponent,location,team_score,opp_score,spread,implied_total,off_total_fp,off_total_fp_hppr,off_total_fp_ppr,qb_fp,rb_fp_hppr,wr_fp_hppr,te_fp_hppr",
+  filters = "team=eq.KC&season=eq.2024&week=lte.5",
+  order = "week.asc"
+)
+
+kc_games |>
+  gt() |>
+  cols_label(
+    week = "Wk", opponent = "Opp", location = "Loc",
+    team_score = "Pts", opp_score = "Opp Pts",
+    spread = "Spread", implied_total = "Impl Tot",
+    off_total_fp = "Team FP (Std)", off_total_fp_hppr = "Team FP (HPPR)",
+    off_total_fp_ppr = "Team FP (PPR)",
+    qb_fp = "QB", rb_fp_hppr = "RB", wr_fp_hppr = "WR", te_fp_hppr = "TE"
+  ) |>
+  tab_spanner(label = "Total Team FP", columns = c(off_total_fp, off_total_fp_hppr, off_total_fp_ppr)) |>
+  tab_spanner(label = "Positional FP (HPPR)", columns = c(qb_fp, rb_fp_hppr, wr_fp_hppr, te_fp_hppr)) |>
+  tab_header(title = "KC Chiefs 2024 — Weekly Breakdown",
+             subtitle = "Three scoring formats from a single table")
+```
+
+### Season-Level View
+
+The `team_season_stats` view pre-aggregates game stats into per-game averages:
+
+```{r season-view}
+season_stats <- supabase_query(
+  "team_season_stats",
+  select = "team,season,games,off_total_fpg_hppr,qb_fpg_hppr,rb_fpg_hppr,wr_fpg_hppr,te_fpg_hppr,def_total_fpg_hppr",
+  filters = "season=eq.2024",
+  order = "off_total_fpg_hppr.desc"
+)
+
+season_stats |>
+  head(10) |>
+  gt() |>
+  cols_label(
+    team = "Team", season = "Year", games = "G",
+    off_total_fpg_hppr = "Off FPG", qb_fpg_hppr = "QB",
+    rb_fpg_hppr = "RB", wr_fpg_hppr = "WR", te_fpg_hppr = "TE",
+    def_total_fpg_hppr = "Def FPG Allowed"
+  ) |>
+  tab_header(title = "Top 10 Offenses — 2024 (Half-PPR FPG)",
+             subtitle = "From team_season_stats view — zero calculation needed")
+```
+
+### Offensive vs Defensive FP (2024)
+
+```{r off-def-scatter, fig.height=7}
+all_season <- supabase_query(
+  "team_season_stats",
+  select = "team,season,off_total_fpg_hppr,def_total_fpg_hppr",
+  filters = "season=eq.2024"
+)
+
+# Load team colors for the chart
+team_colors <- supabase_query("teams", select = "team_abbr,team_color")
+all_season <- all_season |>
+  left_join(team_colors, by = c("team" = "team_abbr"))
+
+avg_off <- mean(all_season$off_total_fpg_hppr)
+avg_def <- mean(all_season$def_total_fpg_hppr)
+
+ggplot(all_season, aes(x = def_total_fpg_hppr, y = off_total_fpg_hppr)) +
+  geom_hline(yintercept = avg_off, linetype = "dashed", color = "gray60") +
+  geom_vline(xintercept = avg_def, linetype = "dashed", color = "gray60") +
+  geom_point(aes(color = team_color), size = 4) +
+  geom_text(aes(label = team), vjust = -1, size = 3) +
+  scale_color_identity() +
+  annotate("text", x = min(all_season$def_total_fpg_hppr) + 1, y = max(all_season$off_total_fpg_hppr),
+           label = "Good offense\nGood defense", fontface = "italic", color = "gray40", size = 3) +
+  annotate("text", x = max(all_season$def_total_fpg_hppr) - 1, y = min(all_season$off_total_fpg_hppr),
+           label = "Bad offense\nBad defense", fontface = "italic", color = "gray40", size = 3) +
+  labs(title = "2024 NFL — Offense vs Defense (Half-PPR FPG)",
+       subtitle = "Lower defensive FPG = better defense (allowed fewer fantasy points)",
+       x = "Defensive FP Allowed Per Game (lower = better)",
+       y = "Offensive FP Scored Per Game (higher = better)")
+```
+
+## Player Stats — Individual Performance
+
+**`r comma(supabase_count("player_stats"))` weekly player-stat rows** spanning 2016-2025.
+Same generated-column pattern as team_game_stats: we store standard FP + receptions,
+and Postgres auto-computes half-PPR and full PPR.
+
+```{r player-stats-example}
+# Top 10 half-PPR scorers in 2025 (>= 10 games)
+top_2025 <- supabase_query(
+  "player_season_stats",
+  select = "first_name,last_name,position,team,season,games,fantasy_points_hppr,fpg_hppr,fp_sd_hppr,rush_yds,rec_yds,receptions,pass_yds",
+  filters = "season=eq.2025&games=gte.10",
+  order = "fpg_hppr.desc",
+  limit = 20
+)
+
+top_2025 |>
+  mutate(rank = row_number()) |>
+  select(rank, first_name, last_name, position, team, games,
+         fpg_hppr, fp_sd_hppr, fantasy_points_hppr, pass_yds, rush_yds, rec_yds, receptions) |>
+  gt() |>
+  cols_label(
+    rank = "#", first_name = "First", last_name = "Last", position = "Pos",
+    team = "Team", games = "G", fpg_hppr = "FPG", fp_sd_hppr = "SD",
+    fantasy_points_hppr = "Total FP", pass_yds = "Pass Yds",
+    rush_yds = "Rush Yds", rec_yds = "Rec Yds", receptions = "Rec"
+  ) |>
+  fmt_number(columns = c(fantasy_points_hppr, pass_yds, rush_yds, rec_yds), decimals = 0) |>
+  tab_header(title = "Top 20 Players — 2025 (Half-PPR FPG, min 10 games)",
+             subtitle = "From player_season_stats view — season totals + per-game averages")
+```
+
+### Season View: Player Comparison
+
+```{r player-season-comparison, fig.height=5}
+# Compare top RBs' FPG across recent seasons
+top_rbs <- supabase_query(
+  "player_season_stats",
+  select = "first_name,last_name,season,fpg_hppr,games",
+  filters = "position=eq.RB&season=gte.2022&games=gte.10",
+  order = "fpg_hppr.desc",
+  limit = 200
+)
+
+# Identify top 6 RBs by peak FPG
+peak_rbs <- top_rbs |>
+  group_by(first_name, last_name) |>
+  summarise(peak = max(fpg_hppr), .groups = "drop") |>
+  arrange(desc(peak)) |>
+  head(6)
+
+top_rbs |>
+  inner_join(peak_rbs, by = c("first_name", "last_name")) |>
+  mutate(player = paste(first_name, last_name)) |>
+  ggplot(aes(x = factor(season), y = fpg_hppr, color = player, group = player)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_brewer(palette = "Set2") +
+  labs(title = "Top RB Fantasy Production (Half-PPR FPG, min 10 games)",
+       subtitle = "Season-over-season comparison from player_season_stats",
+       x = "Season", y = "Fantasy Points Per Game", color = "Player")
+```
+
+# Useful Join Patterns
+
+These are the queries you'll use most often across apps. Each one demonstrates a different
+way to combine tables.
+
+## 1. Player Profile Card
+
+*"Everything about a player in one query"* — combine player info, dynasty value,
+projections, ADP, season stats, and team context.
+
+```{r profile-card, results='asis'}
+# ── Player basics ──────────────────────────────────────────────────────────
+player <- supabase_query(
+  "players",
+  select = "player_id,first_name,last_name,position,latest_team,draft_year,headshot_url,height,weight,college",
+  filters = "last_name=eq.Robinson&first_name=eq.Bijan",
+  limit = 1
+)
+pid <- player$player_id[1]
+team <- player$latest_team[1]
+
+# Team logo
+team_info <- supabase_query("teams", select = "team_logo_espn,team_name",
+                            filters = paste0("team_abbr=eq.", team), limit = 1)
+
+cat('<div style="display:flex; align-items:center; gap:18px; margin-bottom:12px;">\n')
+if (!is.na(player$headshot_url) && nzchar(player$headshot_url)) {
+  cat(sprintf('<img src="%s" height="100" style="border-radius:50%%;">\n', player$headshot_url))
+}
+cat(sprintf('<div><h3 style="margin:0;">%s %s</h3>\n', player$first_name, player$last_name))
+cat(sprintf('<span style="font-size:1.1em;">%s, %s</span>', player$position, team))
+if (nrow(team_info) > 0) {
+  cat(sprintf(' <img src="%s" height="24" style="vertical-align:middle;">', team_info$team_logo_espn[1]))
+}
+cat('</div>\n</div>\n\n')
+
+cat(sprintf("**College**: %s | **Draft**: %s | **Height**: %s | **Weight**: %s lbs\n\n",
+            player$college, player$draft_year, player$height, player$weight))
+
+# ── Dynasty value (SF only) ───────────────────────────────────────────────
+dv <- supabase_query("dynasty_values", select = "sf_value",
+                     filters = paste0("player_id=eq.", pid), limit = 1)
+if (nrow(dv) > 0) {
+  cat(sprintf("**Dynasty SF Value**: %s\n\n", dv$sf_value[1]))
+}
+
+# ── 2026 FBG Projection ──────────────────────────────────────────────────
+proj_df <- supabase_query("player_projections",
+  select = "half_ppr_pts,rush_yds,rec_yds,receptions",
+  filters = paste0("player_id=eq.", pid, "&source=eq.fbg&year=eq.2026"),
+  limit = 1)
+if (nrow(proj_df) > 0) {
+  cat(sprintf("**2026 FBG Projection**: %.0f half-PPR pts (%.0f rush yds, %.0f rec yds, %.0f rec)\n\n",
+              proj_df$half_ppr_pts[1], proj_df$rush_yds[1],
+              proj_df$rec_yds[1], proj_df$receptions[1]))
+}
+```
+
+```{r profile-stats}
+# ── Season stats (last 3 years) ──────────────────────────────────────────
+season_df <- supabase_query("player_season_stats",
+  select = "season,team,games,fpg_hppr,fantasy_points_hppr,rush_yds,rec_yds,receptions,fp_sd_hppr",
+  filters = paste0("player_id=eq.", pid, "&season=gte.2023"),
+  order = "season.asc", limit = 10)
+if (nrow(season_df) > 0) {
+  season_df |>
+    gt() |>
+    cols_label(season = "Year", team = "Team", games = "G",
+               fpg_hppr = "FPG", fantasy_points_hppr = "Total",
+               rush_yds = "Rush", rec_yds = "Rec Yds", receptions = "Rec",
+               fp_sd_hppr = "SD") |>
+    fmt_number(columns = c(fantasy_points_hppr, rush_yds, rec_yds), decimals = 0) |>
+    tab_header(title = "Bijan Robinson — Season Stats (Half-PPR)")
+}
+```
+
+```{r profile-team-context}
+# ── Team RB production: how has ATL's RB room scored? ─────────────────────
+rb_team <- supabase_query("team_season_stats",
+  select = "season,rb_fpg_hppr,off_total_fpg_hppr",
+  filters = paste0("team=eq.", team, "&season=gte.2021"),
+  order = "season.asc")
+if (nrow(rb_team) > 0) {
+  rb_team |>
+    gt() |>
+    cols_label(season = "Year", rb_fpg_hppr = "RB FPG (HPPR)",
+               off_total_fpg_hppr = "Team Off FPG") |>
+    tab_header(title = paste0(team, " RB Fantasy Production — Last 5 Seasons"),
+               subtitle = "Half-PPR points per game for entire RB room")
+}
+```
+
+```{r profile-adp}
+# ── NFFC ADP history (compact) ───────────────────────────────────────────
+adp_df <- supabase_query("adp", select = "year,adp",
+                         filters = paste0("player_id=eq.", pid),
+                         order = "year.asc", limit = 20)
+if (nrow(adp_df) > 0) {
+  # Pivot to one row with years as columns
+  adp_wide <- adp_df |>
+    mutate(year = as.character(year), adp = round(adp, 1)) |>
+    tidyr::pivot_wider(names_from = year, values_from = adp)
+  adp_wide |>
+    gt() |>
+    tab_header(title = "NFFC ADP History")
+}
+
+# ── Underdog ADP trend (3 most recent snapshots) ─────────────────────────
+ud_adp <- supabase_query("adp_sources",
+  select = "date,adp",
+  filters = paste0("player_id=eq.", pid, "&source=eq.underdog&year=eq.2026"),
+  order = "date.desc", limit = 3)
+if (nrow(ud_adp) > 0) {
+  # Reverse so oldest is left, newest is right
+  ud_adp <- ud_adp |> arrange(date) |> mutate(date = as.character(date))
+  latest_date <- ud_adp$date[nrow(ud_adp)]
+
+  # Pivot to one row
+  ud_wide <- ud_adp |>
+    mutate(adp = round(adp, 1)) |>
+    tidyr::pivot_wider(names_from = date, values_from = adp)
+
+  ud_wide |>
+    gt() |>
+    tab_style(
+      style = list(cell_text(weight = "bold"), cell_fill(color = "#d4edda")),
+      locations = cells_body(columns = !!latest_date)
+    ) |>
+    tab_header(title = "Underdog ADP (2026)",
+               subtitle = "Most recent snapshot highlighted")
+}
+```
+
+> **What this shows**: A single player profile pulling from **7 tables** — `players`,
+> `teams`, `dynasty_values`, `player_projections`, `player_season_stats`,
+> `team_season_stats`, `adp`, and `adp_sources`. This is the power of having everything
+> in one database.
+
+## 2. Team Fantasy Profile
+
+*"How does a team distribute fantasy points across positions?"*
+
+```{r team-profile, fig.height=5}
+team_pos <- supabase_query(
+  "team_season_stats",
+  select = "team,season,qb_fpg_hppr,rb_fpg_hppr,wr_fpg_hppr,te_fpg_hppr",
+  filters = "season=gte.2022"
+) |>
+  pivot_longer(cols = c(qb_fpg_hppr, rb_fpg_hppr, wr_fpg_hppr, te_fpg_hppr),
+               names_to = "position", values_to = "fpg") |>
+  mutate(position = toupper(gsub("_fpg_hppr", "", position)))
+
+# Show BUF as an example
+team_pos |>
+  filter(team == "BUF") |>
+  ggplot(aes(x = factor(season), y = fpg, fill = position)) +
+  geom_col(position = "stack") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Buffalo Bills — Positional FP Distribution (Half-PPR)",
+       subtitle = "How offensive fantasy production splits across positions",
+       x = "Season", y = "Fantasy Points Per Game", fill = "Position")
+```
+
+## 3. Defensive Matchup Analysis
+
+*"Which defenses give up the most RB points? Most WR points?"*
+
+```{r def-matchup, fig.height=6}
+def_2024 <- supabase_query(
+  "team_season_stats",
+  select = "team,def_rb_fpg_hppr,def_wr_fpg_hppr,def_te_fpg_hppr,def_qb_fpg_hppr",
+  filters = "season=eq.2024"
+) |>
+  pivot_longer(cols = -team, names_to = "position", values_to = "fpg_allowed") |>
+  mutate(position = toupper(gsub("def_|_fpg_hppr", "", position)))
+
+def_2024 |>
+  filter(position == "RB") |>
+  mutate(team = reorder(team, fpg_allowed)) |>
+  ggplot(aes(x = team, y = fpg_allowed, fill = fpg_allowed)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "#2166ac", high = "#b2182b", guide = "none") +
+  labs(title = "2024 — RB Fantasy Points Allowed Per Game (Half-PPR)",
+       subtitle = "Red = more points allowed (bad defense) = good matchup for RBs",
+       x = NULL, y = "RB FPG Allowed")
+```
+
+## 4. Draft Value vs Projection
+
+*"Are players being drafted where their projections say they should go?"*
+
+```{r draft-vs-proj, fig.height=6}
+# Join ADP to projections for 2026
+adp_2026 <- supabase_query(
+  "adp_sources",
+  select = "player_id,adp,players(first_name,last_name,position)",
+  filters = "source=eq.underdog&year=eq.2026",
+  order = "date.desc",
+  limit = 500
+)
+
+proj_2026 <- supabase_query(
+  "player_projections",
+  select = "player_id,half_ppr_pts",
+  filters = "source=eq.fbg&year=eq.2026",
+  limit = 500
+)
+
+# Deduplicate adp to latest date per player
+adp_dedup <- adp_2026 |>
+  group_by(player_id) |>
+  slice_head(n = 1) |>
+  ungroup()
+
+combined <- adp_dedup |>
+  inner_join(proj_2026, by = "player_id") |>
+  mutate(
+    player = paste(players$first_name, players$last_name),
+    position = players$position
+  ) |>
+  filter(position %in% c("QB", "RB", "WR", "TE"), adp <= 200)
+
+if (nrow(combined) > 0) {
+  ggplot(combined, aes(x = half_ppr_pts, y = adp, color = position)) +
+    geom_point(alpha = 0.7, size = 2.5) +
+    scale_y_reverse() +
+    scale_color_brewer(palette = "Set1") +
+    labs(title = "2026 Underdog ADP vs FBG Projected Points",
+         subtitle = "Players above the trend are overdrafted; below are values",
+         x = "FBG Projected Half-PPR Points", y = "Underdog ADP (lower = drafted earlier)",
+         color = "Position")
+}
+```
+
+# Data Quality Audit (Dynasty SF >= 1.0)
+
+Focused on the **`r total_dv` players with SF dynasty value >= 1.0**.
+
+## Field Coverage Summary
+
+```{r missing-data}
+# Fields to check on the dynasty player set
+key_fields <- c("height", "weight", "latest_team", "position", "college",
+                "headshot_url", "birth_date")
+
+field_counts <- sapply(key_fields, function(f) {
+  supabase_count("players", filters = paste0(f, "=not.is.null&", in_filter))
+})
+
+tibble(
+  field = key_fields,
+  filled = unname(field_counts),
+  missing = total_dv - filled,
+  pct_filled = filled / total_dv
+) |>
+  arrange(pct_filled) |>
+  gt() |>
+  cols_label(field = "Field", filled = "Have", missing = "Missing",
+             pct_filled = "Coverage") |>
+  fmt_percent(columns = pct_filled, decimals = 1) |>
+  tab_style(
+    style = cell_fill(color = "#fff3cd"),
+    locations = cells_body(rows = missing > 0)
+  ) |>
+  tab_header(title = paste0("Player Profile Coverage (", total_dv, " dynasty players)"))
+```
+
+## 2025 Fantasy Stats Coverage
+
+For non-rookies, do we have actual 2025 weekly stats in `player_stats`? This is the real test — not just roster presence, but actual game data.
+
+```{r missing-stats}
+# Get players who have at least one 2025 row in player_stats
+ps_2025 <- supabase_query(
+  "player_season_stats",
+  select = "player_id,games,fpg_hppr",
+  filters = "season=eq.2025",
+  limit = 2000
+)
+
+# Get draft_year to separate rookies from vets
+dv_full <- supabase_query(
+  "players",
+  select = "player_id,first_name,last_name,position,latest_team,draft_year",
+  filters = in_filter,
+  limit = 1000
+) |>
+  inner_join(
+    supabase_query("dynasty_values", select = "player_id,sf_value",
+                   filters = "sf_value=gte.1", limit = 1000),
+    by = "player_id"
+  ) |>
+  left_join(ps_2025 |> select(player_id, games, fpg_hppr), by = "player_id") |>
+  mutate(
+    sf_value = as.numeric(sf_value),
+    draft_year = as.integer(draft_year),
+    is_rookie = !is.na(draft_year) & draft_year >= 2026,
+    has_2025_stats = player_id %in% ps_2025$player_id
+  )
+
+vets <- dv_full |> filter(!is_rookie)
+vets_with <- vets |> filter(has_2025_stats) |> arrange(desc(fpg_hppr))
+vets_missing <- vets |> filter(!has_2025_stats) |> arrange(desc(sf_value))
+
+cat(sprintf("**Non-rookies**: %d total, %d (%s) have 2025 weekly stats in `player_stats`, %d missing\n\n",
+            nrow(vets), sum(vets$has_2025_stats),
+            percent(mean(vets$has_2025_stats)), nrow(vets_missing)))
+cat(sprintf("**2026 rookies**: %d (no 2025 stats expected)\n\n", sum(dv_full$is_rookie)))
+
+if (nrow(vets_missing) > 0 && nrow(vets_missing) <= 50) {
+  vets_missing |>
+    select(first_name, last_name, position, latest_team, sf_value) |>
+    mutate(latest_team = ifelse(is.na(latest_team), "\u2014", latest_team)) |>
+    gt() |>
+    cols_label(first_name = "First", last_name = "Last", position = "Pos",
+               latest_team = "Team", sf_value = "SF Value") |>
+    tab_header(title = "Non-Rookies Missing 2025 Stats in player_stats")
+} else if (nrow(vets_missing) > 50) {
+  cat(sprintf("Too many to list (%d). Top 20 by SF value:\n\n", nrow(vets_missing)))
+  vets_missing |>
+    head(20) |>
+    select(first_name, last_name, position, latest_team, sf_value) |>
+    mutate(latest_team = ifelse(is.na(latest_team), "\u2014", latest_team)) |>
+    gt() |>
+    cols_label(first_name = "First", last_name = "Last", position = "Pos",
+               latest_team = "Team", sf_value = "SF Value") |>
+    tab_header(title = "Top 20 Non-Rookies Missing 2025 Stats")
+}
+```
+
+## Missing Player Details
+
+Who specifically is missing each key field?
+
+```{r dynasty-gaps, results='asis'}
+# Pull all key fields for dynasty players
+dv_detail <- supabase_query(
+  "players",
+  select = "player_id,first_name,last_name,position,latest_team,height,weight,college,headshot_url,birth_date",
+  filters = in_filter,
+  limit = 1000
+) |>
+  inner_join(
+    supabase_query("dynasty_values", select = "player_id,sf_value",
+                   filters = "sf_value=gte.1", limit = 1000),
+    by = "player_id"
+  ) |>
+  mutate(sf_value = as.numeric(sf_value))
+
+for (field in key_fields) {
+  missing <- dv_detail |>
+    filter(is.na(.data[[field]])) |>
+    select(first_name, last_name, position, latest_team, sf_value) |>
+    arrange(desc(sf_value))
+
+  cat(sprintf("\n### Missing `%s` (%d players)\n\n", field, nrow(missing)))
+
+  if (nrow(missing) == 0) {
+    cat("*All players covered.*\n\n")
+  } else if (nrow(missing) <= 30) {
+    tbl <- missing |>
+      mutate(latest_team = ifelse(is.na(latest_team), "\u2014", latest_team)) |>
+      gt() |>
+      cols_label(first_name = "First", last_name = "Last", position = "Pos",
+                 latest_team = "Team", sf_value = "SF Value")
+    print(htmltools::tagList(tbl))
+  } else {
+    cat(sprintf("*%d players missing (showing top 30 by SF value):*\n\n", nrow(missing)))
+    tbl <- missing |>
+      head(30) |>
+      mutate(latest_team = ifelse(is.na(latest_team), "\u2014", latest_team)) |>
+      gt() |>
+      cols_label(first_name = "First", last_name = "Last", position = "Pos",
+                 latest_team = "Team", sf_value = "SF Value")
+    print(htmltools::tagList(tbl))
+  }
+}
+```
+
+## Team Game Stats Completeness
+
+```{r tgs-completeness}
+tgs_summary <- supabase_query(
+  "team_game_stats",
+  select = "season,spread,total_line",
+  limit = 6000
+) |>
+  group_by(season) |>
+  summarise(
+    games = n(),
+    has_spread = sum(!is.na(spread)),
+    has_total = sum(!is.na(total_line)),
+    .groups = "drop"
+  ) |>
+  mutate(
+    pct_spread = has_spread / games,
+    pct_total = has_total / games
+  )
+
+tgs_summary |>
+  gt() |>
+  cols_label(season = "Season", games = "Games",
+             has_spread = "Have Spread", pct_spread = "% Spread",
+             has_total = "Have Total", pct_total = "% Total") |>
+  fmt_percent(columns = c(pct_spread, pct_total), decimals = 0) |>
+  tab_header(title = "Vegas Lines Coverage in team_game_stats")
+```
+
+# Shiny App Data Audit
+
+The dynasty trade value calculator Shiny app (`data/app.r`) currently runs entirely off
+Google Sheets via `gsheet2tbl()`. This section maps every data input the app needs to
+our Supabase schema — what we already have, what we can derive, and what's still missing.
+
+## What the App Does
+
+Six tabs, one core purpose: **manage and visualize dynasty trade values**.
+
+| Tab | Function | Key Data |
+|-----|----------|----------|
+| **Dynasty Trade Value Chart** | Ranked reactable with headshots, team logos, values | Player registry + dynasty values + team logos |
+| **Trade Calculator** | Select players/picks per side, sum values | Players + future draft picks + values |
+| **League Settings** | Sliders adjust scoring → model recalculates values | Positional model + base coefficients |
+| **Rookie Pick Values** | gt table of rookies only (pre-draft headshots) | Rookie flag + pre-draft headshots/logos |
+| **Classic View** | DT table with CSV/Excel export | Same as DTVC, simpler format |
+| **Change Log** | Value change history with green/red deltas | Change log with dates, old/new values, comments |
+
+## Data Mapping: App Needs vs Database
+
+```{r app-data-mapping}
+mapping <- tribble(
+  ~app_field, ~status, ~db_source, ~notes,
+  "Player name", "HAVE", "players.first_name + last_name", "Concat in query or view",
+  "Position", "HAVE", "players.position", "",
+  "Team abbreviation", "HAVE", "players.latest_team", "Auto-updates daily via Sleeper",
+  "Team full name", "HAVE", "teams.team_name", "JOIN on latest_team = team_abbr",
+  "Team logo (ESPN)", "HAVE", "teams.team_logo_espn", "JOIN on latest_team = team_abbr",
+  "Headshot URL", "HAVE", "players.headshot_url", "",
+  "Dynasty 1QB value", "HAVE", "dynasty_values.value", "Synced from Google Sheet via Apps Script",
+  "Dynasty SF value", "HAVE", "dynasty_values.sf_value", "Synced from Google Sheet via Apps Script",
+  "dan_id", "HAVE", "players.dan_id", "Custom player ID for Google Sheet linkage",
+  "gsis_id", "HAVE", "players.gsis_id", "NFL GSIS ID",
+  "sleeper_id", "HAVE", "players.sleeper_id", "94.7% coverage",
+  "College", "HAVE", "players.college", "",
+  "Draft year", "HAVE", "players.draft_year", "",
+  "Birth date", "HAVE", "players.birth_date", "",
+  "Age (live)", "DERIVE", "age(CURRENT_DATE, birth_date)", "Computed in SQL, not stored",
+  "Rookie flag", "DERIVE", "draft_year >= 2026", "Derived from draft_year vs current year",
+  "Years of experience", "DERIVE", "current_year - draft_year", "Derived from draft_year",
+  "2025 fantasy PPG", "HAVE", "player_season_stats view", "fpg_hppr for season = 2025",
+  "Team positional FPG", "HAVE", "team_season_stats view", "rb_fpg_hppr, wr_fpg_hppr, etc.",
+  "Future pick values", "MISSING", "— need dynasty_pick_values", "2025-2028 picks with 1QB + SF values",
+  "Value change log", "MISSING", "— need dynasty_value_log", "Date, old, new, delta, comment",
+  "Pre-draft headshots", "MISSING", "— need rookies pre-draft", "College headshots + logos before NFL draft",
+  "Positional model", "N/A", "Stays as R model file", "Model predicts value multipliers from league settings",
+  "Base/SF coefficients", "N/A", "Config, not DB data", "Reference values for model comparison"
+)
+
+mapping |>
+  gt() |>
+  cols_label(app_field = "App Data Need", status = "Status",
+             db_source = "DB Source", notes = "Notes") |>
+  tab_style(
+    style = cell_fill(color = "#d4edda"),
+    locations = cells_body(rows = status == "HAVE")
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#fff3cd"),
+    locations = cells_body(rows = status == "DERIVE")
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#f8d7da"),
+    locations = cells_body(rows = status == "MISSING")
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#e2e3e5"),
+    locations = cells_body(rows = status == "N/A")
+  ) |>
+  tab_header(
+    title = "Shiny App Data Requirements",
+    subtitle = "Green = have it, Yellow = derivable, Red = need to build, Gray = out of scope"
+  )
+```
+
+**Bottom line**: 19 of 25 data needs are already in the database or trivially derivable.
+Only **3 new tables** are needed to fully replace Google Sheets.
+
+## TODOs: What's Missing
+
+### 1. `dynasty_pick_values` table (HIGH priority)
+
+The app lets users trade **future draft picks** alongside players. Currently these come from a Google Sheet with ~20 rows like "2025 1st", "2026 2nd", etc.
+
+```
+Proposed schema:
+  pick_year    integer       -- e.g. 2025, 2026, 2027
+  pick_round   integer       -- 1-5
+  pick_label   text          -- "2025 1st", "2026 3rd" (display name)
+  value        numeric       -- 1QB trade value
+  sf_value     numeric       -- Superflex trade value
+  updated_at   timestamptz   -- when last changed
+  PK: (pick_year, pick_round)
+```
+
+### 2. `dynasty_value_log` table (MEDIUM priority)
+
+The app's Change Log tab shows a history of value adjustments. Currently a Google Sheet with columns: `dan_id`, `Date`, `Old`, `New`, `Comment`.
+
+```
+Proposed schema:
+  id           serial PK
+  player_id    text REFERENCES players(player_id)
+  changed_at   date          -- when the value changed
+  old_value    numeric       -- previous SF value
+  new_value    numeric       -- updated SF value
+  comment      text          -- reason for change
+```
+
+Could be populated automatically via a Postgres trigger on `dynasty_values` updates, or manually logged when you change values.
+
+### 3. Pre-draft rookie data (LOW priority — seasonal)
+
+The app shows rookies with college headshots and logos before the NFL draft. This is only
+relevant for ~2 months per year (March-April). Could store in `players` directly (college
+headshot/logo columns) or a separate `rookie_prospects` staging table.
+
+## Example Queries: Proving the Data Works
+
+These queries demonstrate that the Shiny app's core data calls already work against our DB.
+
+### The Main DTVC Query
+
+This single query replaces `my_values + player_info + load_teams()` — three separate Google
+Sheet pulls consolidated into one Supabase call:
+
+```{r app-dtvc-query}
+# The core query that powers the Dynasty Trade Value Chart
+dtvc <- supabase_query(
+  "dynasty_values",
+  select = "value,sf_value,players(player_id,dan_id,first_name,last_name,position,latest_team,headshot_url,birth_date,draft_year,college,sleeper_id,gsis_id)",
+  order = "sf_value.desc",
+  limit = 25
+)
+
+# Flatten the nested players object
+dtvc_flat <- dtvc |>
+  transmute(
+    Player = paste(players$first_name, players$last_name),
+    Position = players$position,
+    team = players$latest_team,
+    headshot = ifelse(!is.na(players$headshot_url) & nzchar(players$headshot_url),
+                      paste0('<img src="', players$headshot_url, '" height="40">'), ""),
+    age = round(as.numeric(difftime(Sys.Date(), as.Date(players$birth_date), units = "days")) / 365.25, 1),
+    Value = as.numeric(value),
+    SF_Value = as.numeric(sf_value),
+    Rookie = ifelse(!is.na(players$draft_year) & players$draft_year >= 2026, "Yes", "No"),
+    dan_id = players$dan_id
+  )
+
+# Now join team logos — exactly what the app does with load_teams()
+team_logos <- supabase_query("teams", select = "team_abbr,team_logo_espn")
+dtvc_flat <- dtvc_flat |>
+  left_join(team_logos, by = c("team" = "team_abbr")) |>
+  mutate(
+    team_logo = ifelse(!is.na(team_logo_espn),
+                       paste0('<img src="', team_logo_espn, '" height="30">'), "")
+  )
+
+dtvc_flat |>
+  mutate(Rank = row_number()) |>
+  select(Rank, headshot, Player, Position, age, team_logo, SF_Value) |>
+  gt() |>
+  fmt_markdown(columns = c(headshot, team_logo)) |>
+  cols_label(Rank = "#", headshot = "", Player = "Player", Position = "Pos",
+             age = "Age", team_logo = "Team", SF_Value = "Trade Value") |>
+  tab_header(title = "Dynasty Trade Value Chart (Top 25)",
+             subtitle = "Replaces: gsheet2tbl(my_values) + gsheet2tbl(player_info) + load_teams()") |>
+  tab_source_note("Source: Supabase dynasty_values + players + teams (single REST call + logo join)")
+```
+
+### The Trade Calculator Query
+
+This shows how the trade calculator's asset lookup works — filtering specific players by name
+and summing their values:
+
+```{r app-trade-query}
+# Simulate: "Team A gives Ja'Marr Chase + 2025 1st, Team B gives Bijan Robinson"
+# For now, just the player side (picks need dynasty_pick_values table)
+trade_players <- supabase_query(
+  "dynasty_values",
+  select = "sf_value,players(first_name,last_name,position,latest_team,headshot_url)",
+  filters = "players.last_name=in.(Chase,Robinson)&players.first_name=in.(Ja'Marr,Bijan)",
+  order = "sf_value.desc",
+  limit = 10
+)
+
+# Show what Team A gives vs Team B gives
+if (nrow(trade_players) > 0) {
+  trade_players |>
+    transmute(
+      Player = paste(players$first_name, players$last_name),
+      Position = players$position,
+      Team = players$latest_team,
+      SF_Value = as.numeric(sf_value)
+    ) |>
+    gt() |>
+    grand_summary_rows(
+      columns = SF_Value,
+      fns = list(Total = ~ sum(.)),
+      fmt = ~ fmt_number(., decimals = 1)
+    ) |>
+    fmt_number(columns = SF_Value, decimals = 1) |>
+    tab_header(title = "Trade Calculator — Player Value Lookup",
+               subtitle = "Replaces: filtering dynasty_list by Player name")
+}
+```
+
+### Rookie Identification
+
+The app uses a `Rookie` column from the Google Sheet. We derive it from `draft_year`:
+
+```{r app-rookie-query}
+rookies <- supabase_query(
+  "dynasty_values",
+  select = "sf_value,players(first_name,last_name,position,latest_team,headshot_url,draft_year)",
+  order = "sf_value.desc",
+  limit = 500
+)
+
+rookie_list <- rookies |>
+  transmute(
+    Player = paste(players$first_name, players$last_name),
+    Position = players$position,
+    Team = ifelse(is.na(players$latest_team), "—", players$latest_team),
+    headshot = ifelse(!is.na(players$headshot_url) & nzchar(players$headshot_url),
+                      paste0('<img src="', players$headshot_url, '" height="40">'), ""),
+    draft_year = players$draft_year,
+    SF_Value = as.numeric(sf_value),
+    Rookie = ifelse(!is.na(draft_year) & draft_year >= 2026, "Yes", "No")
+  ) |>
+  filter(Rookie == "Yes") |>
+  arrange(desc(SF_Value))
+
+if (nrow(rookie_list) > 0) {
+  rookie_list |>
+    mutate(Rank = row_number()) |>
+    select(Rank, headshot, Player, Position, Team, SF_Value) |>
+    gt() |>
+    fmt_markdown(columns = headshot) |>
+    fmt_number(columns = SF_Value, decimals = 1) |>
+    cols_label(Rank = "#", headshot = "", Player = "Player", Position = "Pos",
+               Team = "Team", SF_Value = "Value") |>
+    tab_header(title = "2026 Rookie Dynasty Values",
+               subtitle = paste0(nrow(rookie_list), " rookies identified via draft_year >= 2026"))
+} else {
+  cat("*No 2026 rookies found in dynasty_values yet.*\n")
+}
+```
+
+### Player + Season Stats + Team Context (Profile Card Data)
+
+This is the full data pull for a player profile — combining everything the app
+gets from 3 separate Google Sheets into DB queries:
+
+```{r app-profile-query}
+# This demonstrates the same data the app gets from gsheet2tbl(my_values) + gsheet2tbl(player_info)
+# but enriched with actual stats (which the app doesn't even have!)
+
+profile_query <- supabase_query(
+  "dynasty_values",
+  select = "value,sf_value,players(player_id,first_name,last_name,position,latest_team,headshot_url,birth_date,draft_year,college,dan_id)",
+  order = "sf_value.desc",
+  limit = 5
+)
+
+enriched <- profile_query |>
+  transmute(
+    player_id = players$player_id,
+    Player = paste(players$first_name, players$last_name),
+    Pos = players$position,
+    Team = players$latest_team,
+    Age = round(as.numeric(difftime(Sys.Date(), as.Date(players$birth_date), units = "days")) / 365.25, 1),
+    College = players$college,
+    Value_1QB = as.numeric(value),
+    Value_SF = as.numeric(sf_value)
+  )
+
+# Add 2025 FPG from player_season_stats — something the app CAN'T do from Sheets
+season_stats <- supabase_query(
+  "player_season_stats",
+  select = "player_id,fpg_hppr,games",
+  filters = "season=eq.2025",
+  limit = 2000
+)
+
+enriched <- enriched |>
+  left_join(season_stats |> select(player_id, fpg_hppr, games), by = "player_id")
+
+# Add 2026 FBG projection
+proj <- supabase_query(
+  "player_projections",
+  select = "player_id,half_ppr_pts",
+  filters = "source=eq.fbg&year=eq.2026",
+  limit = 500
+)
+
+enriched <- enriched |>
+  left_join(proj |> select(player_id, half_ppr_pts), by = "player_id")
+
+enriched |>
+  select(Player, Pos, Team, Age, Value_SF, fpg_hppr, games, half_ppr_pts) |>
+  gt() |>
+  cols_label(Player = "Player", Pos = "Pos", Team = "Team", Age = "Age",
+             Value_SF = "SF Value", fpg_hppr = "2025 FPG", games = "G",
+             half_ppr_pts = "2026 Proj") |>
+  fmt_number(columns = c(fpg_hppr, half_ppr_pts), decimals = 1) |>
+  sub_missing(missing_text = "—") |>
+  tab_header(
+    title = "Player Profile Data (Top 5 by SF Value)",
+    subtitle = "Dynasty value + actual 2025 stats + 2026 projections — all from Supabase"
+  ) |>
+  tab_source_note("App advantage: DB has actual stats and projections that Google Sheets version lacks")
+```
+
+### Supabase REST API: How the App Would Call This
+
+The Shiny app currently uses `gsheet2tbl()`. Here's the equivalent using Supabase's REST API,
+which supports the same embedded joins shown above:
+
+```{r app-rest-pattern, eval=FALSE}
+# ── In the Shiny app, replace this: ──────────────────────────────────────────
+# my_values <- gsheet2tbl("https://docs.google.com/spreadsheets/d/1opcV...")
+# player_info <- gsheet2tbl("https://docs.google.com/spreadsheets/d/1nWeI...")
+# teams <- load_teams() %>% select(team, team_name, team_logo_espn)
+
+# ── With this single Supabase call: ──────────────────────────────────────────
+library(httr)
+library(jsonlite)
+
+resp <- GET(
+  paste0(SUPABASE_URL, "/rest/v1/dynasty_values",
+         "?select=value,sf_value,",
+         "players(player_id,dan_id,first_name,last_name,position,latest_team,",
+         "headshot_url,birth_date,draft_year,college,sleeper_id,gsis_id)"),
+  add_headers(apikey = ANON_KEY, Authorization = paste("Bearer", ANON_KEY)),
+  query = list(order = "sf_value.desc")
+)
+dynasty_data <- fromJSON(content(resp, "text"))
+
+# Team logos in a second call (32 rows, cacheable)
+resp2 <- GET(
+  paste0(SUPABASE_URL, "/rest/v1/teams?select=team_abbr,team_name,team_logo_espn"),
+  add_headers(apikey = ANON_KEY, Authorization = paste("Bearer", ANON_KEY))
+)
+teams <- fromJSON(content(resp2, "text"))
+
+# ── Benefits over Google Sheets: ─────────────────────────────────────────────
+# 1. Single source of truth (no sync issues between sheets)
+# 2. Embedded joins (one call replaces three gsheet2tbl calls)
+# 3. Server-side filtering/sorting (faster for large datasets)
+# 4. Can add player_stats, projections, ADP in the same query
+# 5. No Google Sheets API rate limits
+```
+
+## Migration Checklist
+
+Summary of what needs to happen to fully migrate the Shiny app off Google Sheets:
+
+```{r app-migration-checklist, results='asis'}
+cat("
+| # | Task | Priority | Effort | Status |
+|---|------|----------|--------|--------|
+| 1 | Create `dynasty_pick_values` table | High | Small (migration + ~20 rows) | TODO |
+| 2 | Create `dynasty_value_log` table | Medium | Small (migration + backfill from Sheet) | TODO |
+| 3 | Add pre-draft rookie headshots/logos | Low | Medium (seasonal, only needed Mar-Apr) | TODO |
+| 4 | Create `dynasty_app_view` (flattened query) | Medium | Small (SQL view) | TODO |
+| 5 | Rewrite app.r to use Supabase REST API | — | Medium (replace gsheet2tbl calls) | Future |
+| 6 | Move positional model to app assets | — | Small (bundle RDS with app) | Future |
+| 7 | Set up Postgres trigger for value change log | Low | Small (auto-log on dynasty_values UPDATE) | Future |
+")
+```
+
+> **Key insight**: The Shiny app currently makes **7 separate Google Sheet calls** on load.
+> Migrating to Supabase collapses this to **2 REST calls** (dynasty data + team logos) with
+> embedded joins, plus the ability to add 2025 stats and 2026 projections that the Google
+> Sheets version doesn't have.
+
+# What's Built vs What's Planned
+
+```{r gap-analysis, results='asis'}
+cat("
+## Built and Loaded
+
+| Category | What | Status |
+|----------|------|--------|
+| **Player Registry** | 1,749 players with 24 cross-platform IDs | Done |
+| **NFFC Drafts** | 8 years (2018-2025), 618K picks, 2,629 leagues | Done |
+| **NFFC ADP** | Annual ADP, 5,339 player-years | Done |
+| **Multi-Source ADP** | Underdog daily snapshots (2026) | Done, auto-updating daily |
+| **Dynasty Values** | 704 players synced from Google Sheet | Done, Apps Script sync |
+| **FBG Projections** | 443 players, 2026 season projections | Done |
+| **Team Reference** | 32 teams with logos, colors, divisions | Done |
+| **Team Game Stats** | 5,278 games (2016-2025), 3 scoring formats | Done |
+| **Season Aggregates** | Team averages/SDs via view | Done |
+| **Player Weekly Stats** | 59K+ player-weeks (2016-2025), 3 scoring formats | Done |
+| **Player Season View** | Per-game averages + SD via view | Done |
+| **Player Enrichment** | Height, weight, headshots, college | Mostly done |
+
+## Still Planned
+
+| Category | What | Priority |
+|----------|------|----------|
+| **Dynasty Pick Values** | Future draft pick trade values (2025-2028 1st-5th) | High |
+| **Dynasty Value Log** | Change history with dates, old/new values, comments | Medium |
+| **DraftKings ADP** | Load DK pre-draft rankings into adp_sources | Medium |
+| **Drafters ADP** | Load Drafters rankings into adp_sources | Medium |
+| **Pre-Draft Rookies** | College headshots + logos for undrafted prospects | Low (seasonal) |
+| **Schedule Table** | Standalone game schedule (beyond team_game_stats) | Low |
+| **Team Projections** | FBG/SportsData team-level projections | Low |
+| **Player Notes** | Personal notes/writeups per player | Low |
+| **Simulation Engine** | Monte Carlo season simulations | Future |
+| **Shiny App Migration** | Rewrite app.r to use Supabase instead of Google Sheets | Future |
+")
+```
+
+# Quick Reference: Common SQL Patterns
+
+These patterns work in any app that connects to Supabase (JavaScript, Python, R, etc.).
+
+## Get a player's full profile
+```sql
+SELECT p.*, dv.value, dv.sf_value, pp.half_ppr_pts
+FROM players p
+LEFT JOIN dynasty_values dv ON p.player_id = dv.player_id
+LEFT JOIN player_projections pp ON p.player_id = pp.player_id
+  AND pp.source = 'fbg' AND pp.year = 2026
+WHERE p.last_name = 'Robinson' AND p.first_name = 'Bijan';
+```
+
+## Team positional FPG for a player's team (last 3 years)
+```sql
+-- If you know the player is an RB on ATL:
+SELECT team, season, rb_fpg_hppr, def_rb_fpg_hppr
+FROM team_season_stats
+WHERE team = 'ATL' AND season >= 2022
+ORDER BY season;
+```
+
+## Compare ADP across platforms
+```sql
+SELECT a.player_id, p.first_name, p.last_name, a.source, a.adp
+FROM adp_sources a
+JOIN players p ON a.player_id = p.player_id
+WHERE a.year = 2026
+  AND a.date = (SELECT MAX(date) FROM adp_sources WHERE source = a.source AND year = 2026)
+ORDER BY a.adp;
+```
+
+## Draft pick history for a player
+```sql
+SELECT dp.year, dp.round, dp.overall_pick, dp.pick_in_round,
+       l.name as league_name
+FROM draft_picks dp
+JOIN leagues l ON dp.league_id = l.league_id
+JOIN players p ON dp.player_id = p.player_id
+WHERE p.last_name = 'Kelce' AND p.first_name = 'Travis'
+ORDER BY dp.year, dp.overall_pick;
+```
+
+## Player season stats (last 3 years)
+```sql
+SELECT first_name, last_name, season, team, games,
+       fpg_hppr, fp_sd_hppr, rush_yds, rec_yds, receptions
+FROM player_season_stats
+WHERE last_name = 'Robinson' AND first_name = 'Bijan'
+ORDER BY season;
+```
+
+## Top half-PPR scorers in a season
+```sql
+SELECT first_name, last_name, position, team, games,
+       fpg_hppr, fantasy_points_hppr
+FROM player_season_stats
+WHERE season = 2025 AND games >= 10
+ORDER BY fpg_hppr DESC
+LIMIT 20;
+```
+
+## Defensive matchup for an upcoming week
+```sql
+-- "How does MIA defense treat RBs in half-PPR?"
+SELECT season, week, opponent, def_rb_fp_hppr
+FROM team_game_stats
+WHERE team = 'MIA' AND season = 2024
+ORDER BY week;
+```
+
+---
+
+*Generated `r Sys.time()` | Data from Supabase project `twfzcrodldvhpfaykasj`*

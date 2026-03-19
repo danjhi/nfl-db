@@ -4,6 +4,28 @@
 
 NFL Database — central repo for managing the Supabase database used across all NFL and fantasy football projects. Contains data pipelines, loading scripts, schema documentation, and DFS analysis notebooks. No app code lives here.
 
+## Obsidian Vault — Sync Rules
+
+Vault path: `/Users/dan/Documents/ObsidianVault/Fantasy Football/`
+
+**Always update the vault proactively — without waiting to be asked — whenever any of the following happen:**
+
+### 1. Schema changes (new table, column, migration)
+- `nfl-db Schema History.md` — add a dated entry (what changed, why, row counts)
+- `nfl-db Schema.md` — update table count and list if tables added/removed
+- `Tables/[table_name].md` — create or update the individual table note
+
+### 2. New scripts or automation
+- Find the most relevant existing task note (e.g. `Task - Multi-Source ADP.md`) and update it: mark action items complete, add implementation notes (API details, match rates, gotchas, launchd schedule)
+- Update `Architecture Overview.md` if the data flow or source status table changes
+- Update `nfl-db.md` if the pipeline section changes
+
+### 3. Task completion
+- Find the task note and update its frontmatter (`status: complete`, `modified: today`) and add a completion summary with final stats/row counts
+
+### General principle
+The vault is the historical record and design rationale. CLAUDE.md is operational. Don't duplicate content verbatim — the vault holds the *why* and *what happened*; CLAUDE.md holds the *how to run it*.
+
 ## Supabase
 
 - **Project ref:** `twfzcrodldvhpfaykasj`
@@ -93,6 +115,12 @@ Scripts are organized by data source.
 |--------|---------|
 | `fetch_underdog_adp.py` | Fetch daily Underdog ADP CSV → upsert into adp_sources (designed to run daily) |
 | `run_daily_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
+| `fetch_drafters_adp.py` | Fetch daily Drafters ADP via Bearer JWT → upsert into adp_sources. Reads `DRAFTERS_JWT` from `.env`; logs a clear error if token has expired (401). ADP stored in round.pick float format (e.g. 1.089). |
+| `run_daily_drafters_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
+| `load_draftkings_adp.py` | Load DraftKings ADP from manually downloaded CSV → upsert into adp_sources. Auto-finds latest `DkPreDraftRankings*.csv` in ~/Downloads. ADP in overall pick float format. |
+| `setup_dk_session.py` | One-time setup: extract DK cookies from Chrome Profile 2 via `browser_cookie3` → save to `data/dk_session.json`. Re-run when daily fetch returns auth errors (~2 weeks). Chrome must be logged in to DK in Profile 2. |
+| `fetch_draftkings_adp.py` | Daily automated DK ADP fetch → upsert into adp_sources. Uses Playwright Chromium with saved session (loads a DK page to trigger fresh `jwe`, then hits API). Requires `data/dk_session.json` from setup script. |
+| `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
 
 ### Projections (`scripts/projections/`)
@@ -120,6 +148,119 @@ Scripts are organized by data source.
 |------|---------|
 | `dynasty_values_sync.js` | Sync dynasty values from Google Sheet → Supabase. Paste into Extensions → Apps Script. Uses service role key stored in Script Properties. |
 | `dynasty_value_history_sync.js` | Sync dynasty value change log from Google Sheet → Supabase. Same setup pattern as dynasty_values_sync. Matches Player names to player_id via normalized name lookup. |
+
+### FBG Bowl (`scripts/fbg_bowl/`)
+
+Complete ETL pipeline for FBG Bowl historical data. Both 2024 and 2025 fully loaded. 12-team Sleeper-based competition.
+
+| Script | Purpose |
+|--------|---------|
+| `shared.py` | Shared utilities: Sleeper API fetch (0.15s sleep, retry), Supabase REST helpers, `compute_week_results()` for W/L from matchup data |
+| `00_load_league_ids.py` | Load league IDs into `fbg_bowl_leagues`. 2025: reads local CSV. 2024: reads local CSV (IDs extracted from standings `league_id` column, deduplicated) |
+| `01_fetch_leagues_and_rosters.py` | Fetch league metadata + rosters/users from Sleeper → `fbg_bowl_leagues` + `fbg_bowl_rosters` |
+| `02_fetch_weekly_matchups.py` | Fetch weeks 1–14 matchups → `fbg_bowl_weekly_results` + `fbg_bowl_standings`. `--playoff` mode fetches weeks 15–17 → `fbg_bowl_playoff_results` |
+| `03_fetch_draft_picks.py` | Fetch draft picks from Sleeper → `fbg_bowl_draft_picks` (100K+ rows) |
+| `04_compute_fbg_scores.py` | Compute FBG Bowl meta-scores (wins + league bonus + semi/finals + top-10 bonuses) → `fbg_bowl_scores` |
+| `05_validate.py` | Validate DB against local CSVs and Google Sheets. Checks row counts, week-14 standings, playoff sheet |
+| `schema.sql` | DDL for all 7 tables. Applied via pg8000 (Management API blocked) |
+
+**Scoring formula**: 1pt/win + 35 (1st in league) or 10 (2nd) + 35 (semi, week 16) + 35 (finals, week 17) + top-10 bonus (300/200/150/125/100/85/70/55/45/35)
+
+**Playoff qualification**: league_rank ≤ 2 OR pts_for ≥ 1920 after week 14
+
+**2025 data loaded** (as of Feb 2026): 417 leagues, 5,004 rosters, 70,056 weekly results, 4,371 playoff results, 100,080 draft picks, 5,004 scores
+
+**2024 data loaded** (as of Feb 2026): 159 leagues, 1,896 rosters, 26,544 weekly results, 2,274 playoff results, 37,920 draft picks, 1,896 scores. League IDs extracted from standings column (deduplicated from 1,896 rows × 12 teams). Saved to `FBG Bowl 2024 League IDs.csv`.
+
+### Sleeper Trade Data (`scripts/sleeper/`)
+
+Upload pipeline for Sleeper dynasty trade data. Source data lives in a separate repo at `~/Desktop/sleeper scrape/` which produces `sleeper.db` (274 MB SQLite). This section in nfl-db handles the Supabase upload only.
+
+**Source data (in `~/Desktop/sleeper scrape/sleeper.db`):**
+- 174,965 users · 65,695 leagues (42,734 dynasty) · 12,629 leagues for 2026
+- 15,509 trades · 66,927 trade assets (26,682 players, 40,245 picks) from 3,972 leagues
+- Date range: Dec 2025 – Mar 2026
+
+| Script | Purpose |
+|--------|---------|
+| `shared.py` | Supabase REST helpers (adapted from `fbg_bowl/shared.py`) |
+| `upload_leagues.py` | Read `sleeper_leagues` from SQLite → upsert into Supabase `sleeper_leagues` |
+| `upload_trades.py` | Read `sleeper_trades` + `sleeper_trade_assets` from SQLite → upsert into Supabase |
+| `schema.sql` | DDL for all 3 Supabase tables + indexes + RLS |
+
+**How to run:**
+```bash
+cd ~/Desktop/nfl-db
+python3 scripts/sleeper/upload_leagues.py    # ~12,629 rows (2026 dynasty leagues)
+python3 scripts/sleeper/upload_trades.py     # ~15,509 trades + ~66,927 assets
+```
+
+**Implementation notes:**
+- Read from SQLite at path configured via `SLEEPER_DB_PATH` env var (default: `~/Desktop/sleeper scrape/sleeper.db`)
+- Use `supa_upsert()` with `on_conflict="transaction_id"` for trades, `on_conflict="league_id"` for leagues
+- Batch size: 500 rows (matching nfl-db convention)
+- Trade assets: delete + re-insert per transaction (no natural PK for upsert — use `transaction_id` to clear old assets first, then batch insert)
+- Skip `raw_json` column to save space (can always re-read from local SQLite if needed)
+- All 3 tables need to be created in Supabase before first upload — use `schema.sql`
+
+**Supabase table schemas:**
+
+```sql
+-- Sleeper dynasty leagues (subset: 2026 dynasty leagues with trades)
+CREATE TABLE sleeper_leagues (
+  league_id         text PRIMARY KEY,
+  season            int,
+  name              text,
+  total_rosters     int,
+  status            text,
+  is_dynasty        boolean DEFAULT false,
+  is_superflex      boolean DEFAULT false,
+  is_tep            boolean DEFAULT false,
+  is_idp            boolean DEFAULT false,
+  ppr_type          text,       -- 'full', 'half', 'standard'
+  rec_ppr           numeric,
+  te_premium        numeric,
+  pass_td_pts       numeric,
+  starter_qb        int,
+  starter_rb        int,
+  starter_wr        int,
+  starter_te        int,
+  starter_flex      int,
+  starter_super_flex int,
+  bench_count       int,
+  taxi_slots        int,
+  draft_rounds      int,
+  pick_trading      boolean DEFAULT true
+);
+
+-- Completed trades from dynasty leagues
+CREATE TABLE sleeper_trades (
+  transaction_id    text PRIMARY KEY,
+  league_id         text REFERENCES sleeper_leagues(league_id),
+  season            int,
+  week              int,
+  created_ms        bigint,
+  roster_ids        jsonb,
+  consenter_ids     jsonb
+);
+
+-- Individual assets (players + picks) within each trade
+CREATE TABLE sleeper_trade_assets (
+  id                       serial PRIMARY KEY,
+  transaction_id           text REFERENCES sleeper_trades(transaction_id),
+  receiving_roster_id      int,
+  asset_type               text,   -- 'player' or 'pick'
+  sleeper_player_id        text,
+  pick_season              int,
+  pick_round               int,
+  pick_original_roster_id  int,
+  pick_slot                int
+);
+```
+
+**Related repos:**
+- `~/Desktop/sleeper scrape/` — Python scraper that produces `sleeper.db` (run `python3 -u scrape_trades.py --skip-discovery` to refresh)
+- `~/Desktop/trade-db/` — Next.js app for browsing trades (reads `sleeper.db` directly, will switch to Supabase later)
 
 ### Analysis (`analysis/`)
 
@@ -149,6 +290,9 @@ FBG crosswalk → match_fbg_ids.py → data/matched/fbg_ids.json
 
 Underdog ADP CSV → load_underdog_adp.py → Supabase adp_sources table (one-time historical)
 Underdog ADP endpoint → fetch_underdog_adp.py → Supabase adp_sources table (daily snapshots)
+Drafters node API → fetch_drafters_adp.py → Supabase adp_sources table (daily snapshots, source="drafters")
+DraftKings CSV (manual download) → load_draftkings_adp.py → Supabase adp_sources table (manual snapshots, source="draftkings")
+Chrome Profile 2 cookies → setup_dk_session.py → data/dk_session.json → fetch_draftkings_adp.py (Playwright) → Supabase adp_sources table (daily snapshots, source="draftkings")
 
 Dynasty values CSV → match_dan_ids.py → Supabase players (dan_id) + dynasty_values (bootstrap)
 Google Sheet → Apps Script (dynasty_values_sync.js) → Supabase dynasty_values (ongoing sync)
@@ -168,20 +312,26 @@ Rookie headshot PNGs → upload_rookie_headshots.py → Supabase Storage (headsh
 Sleeper API → refresh_player_teams.py → Supabase players.latest_team (daily, via launchd)
 
 Player writeups YAML → push_writeups.py → Supabase player_notes (upsert, service role key)
+
+Sleeper scrape SQLite (~/Desktop/sleeper scrape/sleeper.db)
+    → scripts/sleeper/upload_leagues.py → Supabase sleeper_leagues (upsert, 12,629 rows)
+    → scripts/sleeper/upload_trades.py → Supabase sleeper_trades + sleeper_trade_assets (15,509 + 66,927 rows)
 ```
 
 ### Daily Automation (launchd)
 
-Both jobs use macOS launchd with bash wrappers. Date-gated to Feb 19 – Apr 22, 2026.
+All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 19 – Apr 22, 2026. (The `.sh` wrapper scripts exist but are not called by launchd — bash under launchd cannot access Desktop directory files due to macOS security restrictions.)
 
 | Job | Plist | Schedule | Script |
 |-----|-------|----------|--------|
-| Underdog ADP | `~/Library/LaunchAgents/com.nfldb.daily-adp.plist` | 8:00 AM | `scripts/adp/run_daily_adp.sh` → `fetch_underdog_adp.py` |
-| Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | `scripts/ids/run_daily_team_refresh.sh` → `refresh_player_teams.py` |
+| Underdog ADP | `~/Library/LaunchAgents/com.nfldb.daily-adp.plist` | 8:00 AM | inline Python → `fetch_underdog_adp.py` |
+| Drafters ADP | `~/Library/LaunchAgents/com.nfldb.daily-drafters-adp.plist` | 8:05 AM | inline Python → `fetch_drafters_adp.py` |
+| DraftKings ADP | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-adp.plist` | 8:10 AM | inline Python → `fetch_draftkings_adp.py` |
+| Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | inline Python → `refresh_player_teams.py` |
 
-Logs: `data/logs/underdog_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
+Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
 
-**Important**: Plists must use `/bin/bash` as explicit interpreter (not just the script path) to avoid macOS `com.apple.provenance` blocking.
+**Important**: All plists use `/usr/bin/python3 -c` with inline Python (pattern: `os.chdir(repo); exec(compile(open(script).read(), script, 'exec'))`). Do NOT use `/bin/bash` — bash under launchd cannot read files in `~/Desktop/` due to macOS security. The `com.apple.provenance` attribute on files created by VS Code/Claude is set by the OS and cannot be removed.
 
 To manage:
 - `launchctl load ~/Library/LaunchAgents/com.nfldb.daily-*.plist` — enable
@@ -197,7 +347,7 @@ To manage:
 #### `players`
 | Column | Type | Notes |
 |--------|------|-------|
-| `player_id` | text PK | Sportradar UUID (= NFFC player UUID), or Underdog UUID for rookies |
+| `player_id` | text PK | Sportradar UUID (= NFFC player UUID), or Underdog UUID for rookies, or generated UUID for pre-draft prospects with neither |
 | `first_name` | text | |
 | `last_name` | text | |
 | `position` | text | QB, RB, WR, TE, K, TK, TDSP |
@@ -496,7 +646,7 @@ One row per player per regular-season week (2016-2025). PPR variants are **Postg
 | `fantasy_points_ppr` | numeric | **Generated**: `fantasy_points + 1.0 * receptions` |
 | PK | | (player_id, season, week) |
 
-Only includes players that exist in the `players` table (FK enforced). ~59K rows from 1,748 DB players out of ~166K total nflreadr rows.
+Only includes players that exist in the `players` table (FK enforced). ~59K rows from 1,758 DB players out of ~166K total nflreadr rows.
 
 #### `player_seasons`
 | Column | Type | Notes |
@@ -514,6 +664,161 @@ Only includes players that exist in the `players` table (FK enforced). ~59K rows
 | `updated_at` | timestamptz | Defaults to now() |
 
 314 players with writeups (all players with dynasty value >= 2). Managed via `data/writeups/player_writeups.yaml` → `push_writeups.py`. Full replace on each push.
+
+#### `fbg_bowl_leagues`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | Internal ID |
+| `sleeper_id` | text UNIQUE | Sleeper league ID |
+| `year` | integer | Season year (2024, 2025) |
+| `name` | text | League name from Sleeper |
+| `scoring_type` | text | 'ppr', 'half_ppr', or 'standard' (from `scoring_settings.rec`) |
+| `roster_count` | integer | Number of teams (usually 12) |
+
+#### `fbg_bowl_rosters`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | Internal ID (used as FK throughout) |
+| `league_id` | bigint | FK → fbg_bowl_leagues |
+| `sleeper_user_id` | text | Sleeper user ID (owner) |
+| `sleeper_roster_id` | integer | Sleeper roster number within league |
+| `display_name` | text | Sleeper display_name (username) |
+| `team_name` | text | Custom team name (from user metadata, nullable) |
+
+#### `fbg_bowl_weekly_results`
+One row per roster per week (weeks 1–14). Raw weekly W/L/points.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | |
+| `roster_id` | bigint | FK → fbg_bowl_rosters |
+| `league_id` | bigint | FK → fbg_bowl_leagues |
+| `week` | integer | 1–14 |
+| `pts_for` | numeric(8,2) | Points scored (`fpts + fpts_decimal/100`) |
+| `pts_against` | numeric(8,2) | Opponent points |
+| `win` / `loss` / `tie` | boolean | Matchup outcome |
+
+#### `fbg_bowl_standings`
+Cumulative standings after each week (pre-computed for query speed). One row per roster per week.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | |
+| `roster_id` | bigint | FK → fbg_bowl_rosters. UNIQUE with week |
+| `league_id` | bigint | FK → fbg_bowl_leagues |
+| `week` | integer | 1–14 |
+| `wins` / `losses` | integer | Cumulative through this week |
+| `pts_for` / `pts_against` | numeric(10,2) | Cumulative points |
+| `league_rank` | integer | Rank within league (set only on week 14) |
+| `qualified_playoffs` | boolean | True if league_rank ≤ 2 OR pts_for ≥ 1920 (set only on week 14) |
+
+#### `fbg_bowl_playoff_results`
+One row per roster per playoff week (15, 16, 17). Only qualified teams included.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | |
+| `roster_id` | bigint | FK → fbg_bowl_rosters |
+| `league_id` | bigint | FK → fbg_bowl_leagues |
+| `week` | integer | 15, 16, or 17 |
+| `pts_for` | numeric(8,2) | Points scored that week |
+| `final_rank` | integer | Not currently used (NULL) |
+
+#### `fbg_bowl_draft_picks`
+One row per pick per league. No FK to `players` — join via `sleeper_player_id = players.sleeper_id`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | |
+| `league_id` | bigint | FK → fbg_bowl_leagues |
+| `roster_id` | bigint | FK → fbg_bowl_rosters |
+| `sleeper_draft_id` | text | Sleeper draft ID |
+| `pick_no` | integer | Overall pick number |
+| `draft_slot` | integer | Draft position slot |
+| `sleeper_player_id` | text | For DEF: team abbreviation ('PHI', 'LAR'). For players: numeric Sleeper ID |
+| `first_name` / `last_name` | text | From Sleeper draft pick metadata |
+| `position` | text | QB, RB, WR, TE, DEF |
+
+93.3% of `sleeper_player_id` values match `players.sleeper_id` (472/506 unique IDs). 32 DEF picks link to synthetic `DEF_*` player records. 34 fringe players have no match.
+
+#### `fbg_bowl_scores`
+One row per roster per year. Final meta-scores for ranking.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | bigserial PK | |
+| `roster_id` | bigint | FK → fbg_bowl_rosters |
+| `year` | integer | Season year |
+| `reg_season_wins` | integer | Wins through week 14 |
+| `league_rank_bonus` | integer | 35 (1st) / 10 (2nd) / 0 |
+| `semi_bonus` | integer | 35 if scored in week 16, else 0 |
+| `finals_bonus` | integer | 35 if scored in week 17, else 0 |
+| `top10_bonus` | integer | 300/200/150/125/100/85/70/55/45/35 for ranks 1–10 |
+| `total_score` | integer | Sum of all bonuses + wins |
+| `overall_rank` | integer | Rank among all participants that year |
+
+#### `sleeper_leagues`
+Sleeper dynasty leagues (2026 season). Subset of all leagues — only dynasty with `pick_trading` enabled.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `league_id` | text PK | Sleeper league ID |
+| `season` | int | Season year (2026) |
+| `name` | text | League name |
+| `total_rosters` | int | Number of teams (usually 10-14) |
+| `status` | text | e.g., "pre_draft", "in_season" |
+| `is_dynasty` | boolean | Always true (filtered on upload) |
+| `is_superflex` | boolean | Has superflex starter slot |
+| `is_tep` | boolean | TE premium (bonus PPR for TE) |
+| `is_idp` | boolean | IDP league |
+| `ppr_type` | text | 'full', 'half', 'standard' |
+| `rec_ppr` | numeric | PPR value (1.0, 0.5, 0) |
+| `te_premium` | numeric | TE bonus PPR (e.g., 1.5 for TEP) |
+| `pass_td_pts` | numeric | Points per passing TD (4 or 6) |
+| `starter_qb` | int | Number of QB starter slots |
+| `starter_rb` | int | RB starter slots |
+| `starter_wr` | int | WR starter slots |
+| `starter_te` | int | TE starter slots |
+| `starter_flex` | int | FLEX slots |
+| `starter_super_flex` | int | Superflex slots (0 or 1) |
+| `bench_count` | int | Bench roster spots |
+| `taxi_slots` | int | Taxi squad spots |
+| `draft_rounds` | int | Rookie draft rounds |
+| `pick_trading` | boolean | Pick trading enabled |
+
+12,629 rows. Uploaded from `~/Desktop/sleeper scrape/sleeper.db` via `upload_leagues.py`.
+
+#### `sleeper_trades`
+Completed trades from dynasty leagues. One row per trade transaction.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `transaction_id` | text PK | Sleeper transaction ID |
+| `league_id` | text | FK → sleeper_leagues |
+| `season` | int | Season year |
+| `week` | int | NFL week when trade occurred |
+| `created_ms` | bigint | Unix timestamp in milliseconds |
+| `roster_ids` | jsonb | Array of roster IDs involved (e.g., [5, 7]) |
+| `consenter_ids` | jsonb | Array of roster IDs who approved |
+
+15,509 rows from 3,972 leagues. Date range: Dec 2025 – Mar 2026.
+
+#### `sleeper_trade_assets`
+Individual assets (players and draft picks) within each trade. Multiple rows per trade.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | serial PK | Auto-increment |
+| `transaction_id` | text | FK → sleeper_trades |
+| `receiving_roster_id` | int | Roster that received this asset |
+| `asset_type` | text | 'player' or 'pick' |
+| `sleeper_player_id` | text | Sleeper player ID (NULL for picks) |
+| `pick_season` | int | Draft pick year (NULL for players) |
+| `pick_round` | int | Draft pick round (NULL for players) |
+| `pick_original_roster_id` | int | Roster that originally owns the pick (NULL for players) |
+| `pick_slot` | int | Draft slot position (nullable) |
+
+66,927 rows: 26,682 player assets + 40,245 pick assets. Join players via `sleeper_player_id = players.sleeper_id`.
 
 ### Views
 
@@ -563,6 +868,10 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 | `idx_ps_season_week` | player_stats | (season, week) |
 | `idx_ps_team_season` | player_stats | (team, season) |
 | `idx_ps_position_season` | player_stats | (position, season) |
+| `idx_sleeper_trades_league` | sleeper_trades | (league_id) |
+| `idx_sleeper_trades_season_week` | sleeper_trades | (season, week) |
+| `idx_sleeper_trade_assets_txn` | sleeper_trade_assets | (transaction_id) |
+| `idx_sleeper_trade_assets_player` | sleeper_trade_assets | (sleeper_player_id) WHERE asset_type = 'player' |
 
 ### RLS
 
@@ -602,6 +911,8 @@ All tables: RLS enabled. Policies:
 24. `create_positional_model_tables` — Coefficients + baselines for positional value adjustment model + RLS
 25. `create_colleges` — College reference table (738 schools with logos, mascots, colors, conferences) + RLS
 26. `create_player_notes` — Player writeup table (PK player_id, FK → players) + RLS (anon SELECT only)
+27. `create_fbg_bowl_tables` — 7 FBG Bowl tables (leagues, rosters, weekly_results, standings, playoff_results, draft_picks, scores) + RLS + indexes. Applied via pg8000 (Management API blocked by Cloudflare).
+28. `create_sleeper_trade_tables` — 3 Sleeper trade tables (sleeper_leagues, sleeper_trades, sleeper_trade_assets) + 4 indexes + RLS. Applied via pg8000.
 
 Applied via direct SQL (not tracked in migration system):
 - College name normalization — UPDATE players: Mississippi→Ole Miss, North Carolina State→NC State, Pittsburg→Pittsburgh, Virgina Tech→Virginia Tech, Miami (FL)→Miami, Brigham Young→BYU
@@ -614,14 +925,14 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 
 | Table | Rows |
 |-------|------|
-| `players` | 1,748 |
+| `players` | 1,790 (1,758 original + 32 DEF records) |
 | `leagues` | 2,629 |
 | `league_teams` | 31,548 |
 | `adp` | 5,339 |
 | `draft_picks` | 618,856 |
 | `player_seasons` | 6,060 |
 | `adp_sources` | ~2,000+ (growing daily) |
-| `dynasty_values` | 704 |
+| `dynasty_values` | 714 |
 | `player_projections` | 443 |
 | `teams` | 32 |
 | `team_game_stats` | 5,278 |
@@ -632,8 +943,18 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `positional_model_baselines` | 2 |
 | `colleges` | 738 |
 | `player_notes` | 314 |
+| `fbg_bowl_leagues` | 576 (417 for 2025, 159 for 2024) |
+| `fbg_bowl_rosters` | 6,900 (5,004 for 2025, 1,896 for 2024) |
+| `fbg_bowl_weekly_results` | 96,600 (70,056 for 2025, 26,544 for 2024) |
+| `fbg_bowl_standings` | 96,600 (70,056 for 2025, 26,544 for 2024) |
+| `fbg_bowl_playoff_results` | 6,645 (4,371 for 2025, 2,274 for 2024) |
+| `fbg_bowl_draft_picks` | 138,000 (100,080 for 2025, 37,920 for 2024) |
+| `fbg_bowl_scores` | 6,900 (5,004 for 2025, 1,896 for 2024) |
+| `sleeper_leagues` | 12,629 (2026 dynasty leagues) |
+| `sleeper_trades` | 15,509 (from 3,972 leagues, Dec 2025 – Mar 2026) |
+| `sleeper_trade_assets` | 66,927 (26,682 players + 40,245 picks) |
 
-### Player ID Coverage (1,748 players)
+### Player ID Coverage (1,758 players)
 
 | ID Column | Count | Coverage |
 |-----------|-------|----------|
@@ -666,7 +987,9 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 
 | Source | Year | Dates Tracked | Latest Row Count |
 |--------|------|---------------|-----------------|
-| `underdog` | 2026 | 3+ (daily since Feb 16) | ~2,000+ (growing daily) |
+| `underdog` | 2026 | daily since Feb 16 | ~2,000+ (growing daily) |
+| `drafters` | 2026 | daily since Feb 26 | growing daily. ADP in round.pick float format (e.g. 1.089). JWT auth — update `DRAFTERS_JWT` in `.env` when 401 appears in log. |
+| `draftkings` | 2026 | daily since Feb 27 | ~312/snapshot, 0 unmatched. ADP in overall pick float format. Fully automated via Playwright: `setup_dk_session.py` (one-time per ~2 weeks, reads Chrome Profile 2 cookies) → `fetch_draftkings_adp.py` (daily, Playwright Chromium loads DK page to get fresh `jwe`, then hits API). Re-run setup when 401 appears in `draftkings_adp.log`. |
 
 ## Supabase Storage
 
@@ -747,8 +1070,25 @@ Located in `data/imports/` (git-ignored):
 - `team_projections` — FBG/SportsData team projections
 
 ### Other Planned Data
-- DraftKings and Drafters ADP into `adp_sources`
 - 2026 season simulation engine
+
+## Pre-Draft Prospect Add Process
+
+When a high-value prospect emerges mid-season (combine, pro days, pre-draft hype), add them manually:
+
+1. **Check Sleeper** — `GET https://api.sleeper.app/v1/players/nfl`, search by name → grab `sleeper_id`, `draftkings_id`, `underdog_id`, `drafters_id`
+2. **Check DK rankings** — `data/imports/DkPreDraftRankings.csv` or fetch live from `fetch_draftkings_adp.py` run — grab `draftkings_id` if not on Sleeper
+3. **Determine `player_id`**: use Underdog UUID if present; otherwise generate a UUID (`python3 -c "import uuid; print(uuid.uuid4())"`)
+4. **Insert player** via REST API (use service role key). Insert **individually** (not batch) since field sets vary. Minimum fields: `player_id`, `first_name`, `last_name`, `position`
+5. **PATCH IDs** individually: `draftkings_id`, `sleeper_id`, `underdog_id`, `drafters_id` as available
+6. **Assign `dan_id`** — add to Google Sheet with next sequential ID (format: `2026NNN`), push dynasty values from Sheet → Supabase via Apps Script
+7. **Verify** — run `fetch_draftkings_adp.py --dry-run` to confirm new player is now matched
+
+**Note**: Pre-draft prospects won't have Sportradar IDs, gsis_id, or most nflreadr IDs until they're drafted and appear in nflreadr. Those populate later via the normal ID matching pipeline.
+
+**Examples added**:
+- Feb 27, 2026 (combine): Brenen Thompson (dan_id=2026072, WR), Jeff Caldwell (dan_id=2026073, WR), Deion Burks (dan_id=2026074, WR).
+- Mar 4, 2026 (pre-draft): Taylen Green (2026075, QB), Cole Payton (2026076, QB), Behren Morton (2026077, QB), Drew Allar (2026078, QB), Cade Klubnik (2026079, QB), Carson Beck (2026080, QB — already in DB, dan_id patched), Jamarion Miller (2026081, RB — "Jam Miller" on Sleeper/DK/Underdog), Robert Henry Jr. (2026082, RB — no Sleeper or Underdog ID).
 
 ## Key Gotchas
 
@@ -764,7 +1104,8 @@ Located in `data/imports/` (git-ignored):
 - Supabase MCP token expires; can bypass with direct Postgres via RPostgres (R) using `SUPABASE_DB_PASSWORD`
 - REST API batch POSTs require all objects to have identical keys — insert individually for variable schemas
 - FBG API player IDs are abbreviated name+year codes, not numeric — need crosswalk to match
-- Rookies not in nflreadr may use Underdog UUID as player_id
+- Pre-draft prospects / rookies not in nflreadr use Underdog UUID as player_id, or a generated UUID if no Underdog UUID exists — see Pre-Draft Prospect Add Process above
+- `/bin/bash` cannot access `~/Desktop/` files under launchd — use `/usr/bin/python3 -c` inline Python for all plists in this repo
 - Sleeper API requires no auth, returns ~5MB — call sparingly (once/day). Best source for sleeper_id + cross-referencing sportradar_ids
 - SportsData.io Rookies/{season} endpoint is best source for pre-draft rookie IDs
 - Use `python3` not `python` on this Mac
@@ -778,3 +1119,5 @@ Located in `data/imports/` (git-ignored):
 - NFFC API `"number"` field counts drafts across ALL contest types, not just Rotowire OC — `build_clean_dataset.py` recalculates `times_drafted` from actual `draft_picks`
 - Supabase REST API silently caps results at 1000 rows even with `limit=2000` — use `Prefer: count=exact` header + `content-range` for accurate counts
 - Duplicate player records can exist when same player has both sportradar UUID and Underdog UUID — merge by moving FK references before deleting
+- 32 DEF records added to `players` table with `player_id = 'DEF_{ABBR}'` (e.g., `DEF_PHI`, `DEF_LAR`). `sleeper_id` = Sleeper abbreviation (LAR for Rams, matching Sleeper's format). `latest_team` uses normalized abbr (LA for Rams). Allows joining `fbg_bowl_draft_picks.sleeper_player_id = players.sleeper_id` for all positions
+- FBG Bowl draft picks: 93.3% match to players table (472/506 unique IDs). 34 unmatched are fringe/practice-squad players not worth adding

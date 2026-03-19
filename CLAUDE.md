@@ -174,9 +174,9 @@ Complete ETL pipeline for FBG Bowl historical data. Both 2024 and 2025 fully loa
 
 ### Sleeper Trade Data (`scripts/sleeper/`)
 
-Upload pipeline for Sleeper dynasty trade data. Source data lives in a separate repo at `~/Desktop/sleeper scrape/` which produces `sleeper.db` (274 MB SQLite). This section in nfl-db handles the Supabase upload only.
+Upload pipeline for Sleeper dynasty trade data. Source data lives in a separate repo at `~/dev/sleeper-scrape/` which produces `sleeper.db` (274 MB SQLite). This section in nfl-db handles the Supabase upload only.
 
-**Source data (in `~/Desktop/sleeper scrape/sleeper.db`):**
+**Source data (in `~/dev/sleeper-scrape/sleeper.db`):**
 - 174,965 users · 65,695 leagues (42,734 dynasty) · 12,629 leagues for 2026
 - 15,509 trades · 66,927 trade assets (26,682 players, 40,245 picks) from 3,972 leagues
 - Date range: Dec 2025 – Mar 2026
@@ -190,13 +190,13 @@ Upload pipeline for Sleeper dynasty trade data. Source data lives in a separate 
 
 **How to run:**
 ```bash
-cd ~/Desktop/nfl-db
+cd ~/dev/nfl-db
 python3 scripts/sleeper/upload_leagues.py    # ~12,629 rows (2026 dynasty leagues)
 python3 scripts/sleeper/upload_trades.py     # ~15,509 trades + ~66,927 assets
 ```
 
 **Implementation notes:**
-- Read from SQLite at path configured via `SLEEPER_DB_PATH` env var (default: `~/Desktop/sleeper scrape/sleeper.db`)
+- Read from SQLite at path configured via `SLEEPER_DB_PATH` env var (default: `~/dev/sleeper-scrape/sleeper.db`)
 - Use `supa_upsert()` with `on_conflict="transaction_id"` for trades, `on_conflict="league_id"` for leagues
 - Batch size: 500 rows (matching nfl-db convention)
 - Trade assets: delete + re-insert per transaction (no natural PK for upsert — use `transaction_id` to clear old assets first, then batch insert)
@@ -259,8 +259,8 @@ CREATE TABLE sleeper_trade_assets (
 ```
 
 **Related repos:**
-- `~/Desktop/sleeper scrape/` — Python scraper that produces `sleeper.db` (run `python3 -u scrape_trades.py --skip-discovery` to refresh)
-- `~/Desktop/trade-db/` — Next.js app for browsing trades (reads `sleeper.db` directly, will switch to Supabase later)
+- `~/dev/sleeper-scrape/` — Python scraper that produces `sleeper.db` (run `python3 -u scrape_trades.py --skip-discovery` to refresh)
+- `~/dev/trade-db/` — Next.js app for browsing trades (reads `sleeper.db` directly, will switch to Supabase later)
 
 ### Analysis (`analysis/`)
 
@@ -313,7 +313,7 @@ Sleeper API → refresh_player_teams.py → Supabase players.latest_team (daily,
 
 Player writeups YAML → push_writeups.py → Supabase player_notes (upsert, service role key)
 
-Sleeper scrape SQLite (~/Desktop/sleeper scrape/sleeper.db)
+Sleeper scrape SQLite (~/dev/sleeper-scrape/sleeper.db)
     → scripts/sleeper/upload_leagues.py → Supabase sleeper_leagues (upsert, 12,629 rows)
     → scripts/sleeper/upload_trades.py → Supabase sleeper_trades + sleeper_trade_assets (15,509 + 66,927 rows)
 ```
@@ -331,7 +331,7 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 
 Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
 
-**Important**: All plists use `/usr/bin/python3 -c` with inline Python (pattern: `os.chdir(repo); exec(compile(open(script).read(), script, 'exec'))`). Do NOT use `/bin/bash` — bash under launchd cannot read files in `~/Desktop/` due to macOS security. The `com.apple.provenance` attribute on files created by VS Code/Claude is set by the OS and cannot be removed.
+**Important**: All plists use `/usr/bin/python3 -c` with inline Python (pattern: `os.chdir(repo); exec(compile(open(script).read(), script, 'exec'))`). Do NOT use `/bin/bash` — bash under launchd cannot read files in `~/dev/` due to macOS security. The `com.apple.provenance` attribute on files created by VS Code/Claude is set by the OS and cannot be removed.
 
 To manage:
 - `launchctl load ~/Library/LaunchAgents/com.nfldb.daily-*.plist` — enable
@@ -786,7 +786,7 @@ Sleeper dynasty leagues (2026 season). Subset of all leagues — only dynasty wi
 | `draft_rounds` | int | Rookie draft rounds |
 | `pick_trading` | boolean | Pick trading enabled |
 
-12,629 rows. Uploaded from `~/Desktop/sleeper scrape/sleeper.db` via `upload_leagues.py`.
+12,629 rows. Uploaded from `~/dev/sleeper-scrape/sleeper.db` via `upload_leagues.py`.
 
 #### `sleeper_trades`
 Completed trades from dynasty leagues. One row per trade transaction.
@@ -1105,7 +1105,7 @@ When a high-value prospect emerges mid-season (combine, pro days, pre-draft hype
 - REST API batch POSTs require all objects to have identical keys — insert individually for variable schemas
 - FBG API player IDs are abbreviated name+year codes, not numeric — need crosswalk to match
 - Pre-draft prospects / rookies not in nflreadr use Underdog UUID as player_id, or a generated UUID if no Underdog UUID exists — see Pre-Draft Prospect Add Process above
-- `/bin/bash` cannot access `~/Desktop/` files under launchd — use `/usr/bin/python3 -c` inline Python for all plists in this repo
+- `/bin/bash` cannot access `~/dev/` files under launchd — use `/usr/bin/python3 -c` inline Python for all plists in this repo
 - Sleeper API requires no auth, returns ~5MB — call sparingly (once/day). Best source for sleeper_id + cross-referencing sportradar_ids
 - SportsData.io Rookies/{season} endpoint is best source for pre-draft rookie IDs
 - Use `python3` not `python` on this Mac

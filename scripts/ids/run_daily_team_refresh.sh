@@ -11,5 +11,5 @@ if [ "$TODAY" -lt 20260219 ] || [ "$TODAY" -gt 20260422 ]; then
 fi
 
 echo "$(date): Starting team refresh from Sleeper..."
-/usr/bin/python3 /Users/dan/Desktop/nfl-db/scripts/ids/refresh_player_teams.py
+/usr/bin/python3 /Users/dan/dev/nfl-db/scripts/ids/refresh_player_teams.py
 echo "$(date): Done."

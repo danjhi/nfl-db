@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NFL Database — Schema Overview</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232735;
+    --border: #2e3345;
+    --text: #e1e4ed;
+    --text-muted: #8b90a0;
+    --accent: #6c8cff;
+    --accent2: #4fc3f7;
+    --green: #4caf50;
+    --yellow: #ffb74d;
+    --red: #ef5350;
+    --orange: #ff9800;
+    --purple: #b388ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; color: #fff; }
+  h1 span { color: var(--accent); }
+  .subtitle { color: var(--text-muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  h2 {
+    font-size: 1.3rem;
+    color: var(--accent2);
+    margin: 2.5rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; color: #fff; margin: 1.5rem 0 0.75rem; }
+
+  /* Dashboard cards */
+  .dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+    text-align: center;
+  }
+  .card .number {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.2;
+  }
+  .card .label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 0.25rem;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+    font-size: 0.875rem;
+  }
+  th, td {
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--surface2);
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  tr:hover td { background: rgba(108, 140, 255, 0.04); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td code, th code {
+    background: var(--surface2);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+    font-size: 0.85em;
+    color: var(--accent);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* Completion bars */
+  .bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .bar {
+    flex: 1;
+    height: 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 80px;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+  .bar-fill.high { background: var(--green); }
+  .bar-fill.mid { background: var(--yellow); }
+  .bar-fill.low { background: var(--orange); }
+  .bar-fill.vlow { background: var(--red); }
+  .pct { font-size: 0.8rem; color: var(--text-muted); min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Badges */
+  .badge {
+    display: inline-block;
+    padding: 0.15em 0.5em;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-pk { background: rgba(108,140,255,0.15); color: var(--accent); }
+  .badge-fk { background: rgba(179,136,255,0.15); color: var(--purple); }
+  .badge-gen { background: rgba(76,175,80,0.15); color: var(--green); }
+  .badge-idx { background: rgba(255,152,0,0.15); color: var(--orange); }
+  .badge-rls { background: rgba(239,83,80,0.15); color: var(--red); }
+
+  /* Table group wrapper */
+  .table-group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .table-group h3 {
+    margin-top: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .table-group h3 .row-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+  .table-desc {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+  }
+  .table-meta {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+  }
+
+  /* Domain sections */
+  .domain-header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+  }
+  .domain-header .count {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  /* ER Diagram */
+  .er-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    overflow-x: auto;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    white-space: pre;
+  }
+  .er-diagram .entity { color: var(--accent); font-weight: 600; }
+  .er-diagram .relation { color: var(--purple); }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    body { padding: 1rem; }
+    .dashboard { grid-template-columns: repeat(2, 1fr); }
+    table { font-size: 0.8rem; }
+    th, td { padding: 0.4rem 0.5rem; }
+  }
+
+  /* Nav / TOC */
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2rem;
+    columns: 2;
+    column-gap: 2rem;
+  }
+  .toc a {
+    display: block;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.875rem;
+    padding: 0.2rem 0;
+    break-inside: avoid;
+  }
+  .toc a:hover { text-decoration: underline; }
+  @media (max-width: 600px) { .toc { columns: 1; } }
+
+  .notes {
+    background: var(--surface);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 10px 10px 0;
+    padding: 1rem 1.25rem;
+    margin: 1rem 0;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+  }
+  .notes strong { color: var(--text); }
+</style>
+</head>
+<body>
+
+<h1>NFL <span>Database</span></h1>
+<p class="subtitle">Supabase (PostgreSQL) &mdash; Project <code>twfzcrodldvhpfaykasj</code> &mdash; Schema snapshot as of April 1, 2026</p>
+
+<!-- ───────── Dashboard ───────── -->
+<div class="dashboard">
+  <div class="card"><div class="number">33</div><div class="label">Tables</div></div>
+  <div class="card"><div class="number">3</div><div class="label">Views</div></div>
+  <div class="card"><div class="number">77</div><div class="label">Indexes</div></div>
+  <div class="card"><div class="number">1,815</div><div class="label">Players</div></div>
+  <div class="card"><div class="number">1.56M</div><div class="label">Total Rows</div></div>
+  <div class="card"><div class="number">29</div><div class="label">Migrations</div></div>
+  <div class="card"><div class="number">5</div><div class="label">ADP Sources</div></div>
+  <div class="card"><div class="number">10</div><div class="label">Seasons (2016&ndash;25)</div></div>
+</div>
+
+<!-- ───────── TOC ───────── -->
+<h2>Contents</h2>
+<div class="toc">
+  <a href="#core">1. Core Tables (players, leagues, drafts)</a>
+  <a href="#adp">2. ADP &amp; Projections</a>
+  <a href="#dynasty">3. Dynasty Values &amp; Model</a>
+  <a href="#stats">4. Stats &amp; Teams</a>
+  <a href="#fbg">5. FBG Bowl</a>
+  <a href="#sleeper">6. Sleeper Data</a>
+  <a href="#ref">7. Reference Tables</a>
+  <a href="#content">8. Content &amp; News</a>
+  <a href="#players-completeness">9. Player Column Completeness</a>
+  <a href="#views">10. Views</a>
+  <a href="#indexes">11. Index Catalog</a>
+  <a href="#rls">12. RLS &amp; Security</a>
+  <a href="#er">13. Entity Relationships</a>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="core">1. Core Tables</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">Central player registry and NFFC historical draft data (2018&ndash;2025).</p>
+
+<!-- players -->
+<div class="table-group">
+  <h3><code>players</code> <span class="row-count">1,815 rows</span></h3>
+  <p class="table-desc">
+    Master player registry. Primary key is Sportradar UUID (same as NFFC player UUID).
+    Includes 24 cross-platform ID columns, bio data, and draft capital.
+    32 synthetic DEF records (e.g. <code>DEF_PHI</code>) exist for FBG Bowl joins.
+  </p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: player_id</span>
+    <span class="badge badge-idx">7 indexes</span>
+    <span class="badge badge-rls">RLS: anon SELECT</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>player_id</code></td><td>text</td><td>Sportradar UUID (PK)</td></tr>
+    <tr><td><code>first_name</code>, <code>last_name</code></td><td>text</td><td>99.9% / 100% filled</td></tr>
+    <tr><td><code>position</code></td><td>text</td><td>QB, RB, WR, TE, K, PK, TK, TDSP, DEF</td></tr>
+    <tr><td><code>birth_date</code></td><td>date</td><td>90.4% filled</td></tr>
+    <tr><td><code>latest_team</code></td><td>text</td><td>88.4% filled, nflreadr abbreviations (LA not LAR)</td></tr>
+    <tr><td><code>status</code></td><td>text</td><td>Active/Inactive &mdash; 85.9%</td></tr>
+    <tr><td><code>college</code></td><td>text</td><td>90.5% filled, normalized to ESPN names</td></tr>
+    <tr><td><code>draft_year</code> / <code>draft_round</code> / <code>draft_pick</code></td><td>integer</td><td>89.8% / 55.8% / 55.8%</td></tr>
+    <tr><td><code>height</code></td><td>text</td><td>"6-2" format &mdash; 66.1%</td></tr>
+    <tr><td><code>weight</code></td><td>integer</td><td>Pounds &mdash; 66.1%</td></tr>
+    <tr><td><code>headshot_url</code></td><td>text</td><td>88.6% filled</td></tr>
+    <tr><td><code>dan_id</code></td><td>text</td><td>Personal custom ID &mdash; 39.3% (unique partial index)</td></tr>
+    <tr><td colspan="3" style="color:var(--text-muted);font-style:italic">+ 24 cross-platform ID columns &mdash; see <a href="#players-completeness" style="color:var(--accent)">Section 9</a></td></tr>
+  </table>
+</div>
+
+<!-- Position breakdown -->
+<div class="table-group">
+  <h3>Player Position Breakdown</h3>
+  <table>
+    <tr><th>Position</th><th class="num">Count</th><th>Share</th></tr>
+    <tr><td>WR</td><td class="num">625</td><td>34.4%</td></tr>
+    <tr><td>RB</td><td class="num">499</td><td>27.5%</td></tr>
+    <tr><td>TE</td><td class="num">311</td><td>17.1%</td></tr>
+    <tr><td>QB</td><td class="num">207</td><td>11.4%</td></tr>
+    <tr><td>PK / K</td><td class="num">67</td><td>3.7%</td></tr>
+    <tr><td>TK / TDSP</td><td class="num">73</td><td>4.0%</td></tr>
+    <tr><td>DEF</td><td class="num">32</td><td>1.8%</td></tr>
+    <tr><td>LB</td><td class="num">1</td><td>&lt;0.1%</td></tr>
+  </table>
+</div>
+
+<!-- leagues -->
+<div class="table-group">
+  <h3><code>leagues</code> <span class="row-count">2,629 rows</span></h3>
+  <p class="table-desc">NFFC league metadata. Filtered to Rotowire Online Championship contests (2018&ndash;2025).</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: league_id</span>
+    <span class="badge badge-idx">idx_leagues_year</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>league_id</code></td><td>integer</td><td>NFFC league ID (PK)</td></tr>
+    <tr><td><code>year</code></td><td>integer</td><td>Season year</td></tr>
+    <tr><td><code>name</code></td><td>text</td><td>Full league name</td></tr>
+    <tr><td><code>num_teams</code></td><td>integer</td><td>Usually 12</td></tr>
+    <tr><td><code>third_round_reversal</code></td><td>boolean</td><td>3RR enabled</td></tr>
+    <tr><td><code>draft_date</code></td><td>text</td><td>ISO timestamp</td></tr>
+    <tr><td><code>draft_completed_date</code></td><td>text</td><td></td></tr>
+  </table>
+</div>
+
+<!-- league_teams -->
+<div class="table-group">
+  <h3><code>league_teams</code> <span class="row-count">31,548 rows</span></h3>
+  <p class="table-desc">Team entries within each NFFC league. Includes draft slot, final standing, and season points.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (league_id, team_id)</span>
+    <span class="badge badge-fk">FK &rarr; leagues</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>league_id</code></td><td>integer</td><td>FK &rarr; leagues</td></tr>
+    <tr><td><code>team_id</code></td><td>integer</td><td>NFFC team ID</td></tr>
+    <tr><td><code>year</code></td><td>integer</td><td></td></tr>
+    <tr><td><code>draft_order</code></td><td>integer</td><td>1&ndash;12 slot. NULL for 2018</td></tr>
+    <tr><td><code>league_rank</code></td><td>integer</td><td>Final standing. NULL for 2018, 2025</td></tr>
+    <tr><td><code>league_points</code></td><td>numeric</td><td>Season fantasy points. NULL for 2018, 2025</td></tr>
+    <tr><td><code>overall_rank</code> / <code>overall_points</code></td><td>integer / numeric</td><td>Cross-league ranking</td></tr>
+  </table>
+</div>
+
+<!-- draft_picks -->
+<div class="table-group">
+  <h3><code>draft_picks</code> <span class="row-count">618,856 rows</span></h3>
+  <p class="table-desc">Every individual draft pick across all NFFC leagues. ~1.4% have empty player_id (API bug).</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (league_id, overall_pick)</span>
+    <span class="badge badge-fk">FK &rarr; leagues, league_teams, players</span>
+    <span class="badge badge-idx">4 indexes</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>league_id</code></td><td>integer</td><td>FK &rarr; leagues</td></tr>
+    <tr><td><code>year</code></td><td>integer</td><td></td></tr>
+    <tr><td><code>round</code></td><td>integer</td><td>1&ndash;20</td></tr>
+    <tr><td><code>pick_in_round</code></td><td>integer</td><td>1&ndash;12</td></tr>
+    <tr><td><code>overall_pick</code></td><td>integer</td><td>1&ndash;240</td></tr>
+    <tr><td><code>team_id</code></td><td>integer</td><td>FK &rarr; league_teams</td></tr>
+    <tr><td><code>player_id</code></td><td>text</td><td>FK &rarr; players (98.6% filled)</td></tr>
+    <tr><td><code>picked_at</code></td><td>text</td><td>ISO timestamp</td></tr>
+    <tr><td><code>pick_duration</code></td><td>integer</td><td>Seconds (can exceed 32K)</td></tr>
+  </table>
+</div>
+
+<!-- player_seasons -->
+<div class="table-group">
+  <h3><code>player_seasons</code> <span class="row-count">6,060 rows</span></h3>
+  <p class="table-desc">Player&ndash;season&ndash;team mapping. Built from nflreadr rosters. Used by <code>view_draft_board</code> to resolve which team a player was on in a given draft year.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, year)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+  </div>
+</div>
+
+<!-- adp -->
+<div class="table-group">
+  <h3><code>adp</code> <span class="row-count">5,339 rows</span></h3>
+  <p class="table-desc">NFFC Rotowire OC aggregate ADP by year. One row per player per year.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, year)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>player_id</code></td><td>text</td><td>FK &rarr; players</td></tr>
+    <tr><td><code>year</code></td><td>integer</td><td></td></tr>
+    <tr><td><code>adp</code></td><td>numeric</td><td>Average draft position</td></tr>
+    <tr><td><code>min_pick</code> / <code>max_pick</code></td><td>integer</td><td>Earliest / latest pick</td></tr>
+    <tr><td><code>times_drafted</code></td><td>integer</td><td>Recalculated from actual draft_picks</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="adp">2. ADP &amp; Projections</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">Daily ADP snapshots from multiple platforms plus season-level projections.</p>
+
+<!-- adp_sources -->
+<div class="table-group">
+  <h3><code>adp_sources</code> <span class="row-count">75,663 rows</span></h3>
+  <p class="table-desc">
+    Multi-platform daily ADP snapshots. Each day's fetch creates new rows (not overwritten), enabling ADP trend tracking over time.
+    Tracked since Feb 16, 2026 across 5 sources over 44 days.
+  </p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, source, year, date)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+    <span class="badge badge-idx">2 indexes (date, source+year+date)</span>
+    <span class="badge badge-rls">RLS: anon SELECT + INSERT</span>
+  </div>
+  <table>
+    <tr><th>Source</th><th class="num">Days Tracked</th><th class="num">Rows</th><th>Notes</th></tr>
+    <tr><td><code>underdog</code></td><td class="num">43</td><td class="num">17,839</td><td>Best Ball rankings, daily since Feb 16</td></tr>
+    <tr><td><code>drafters</code></td><td class="num">35</td><td class="num">40,294</td><td>JWT auth, ADP in round.pick format</td></tr>
+    <tr><td><code>draftkings</code></td><td class="num">17</td><td class="num">5,368</td><td>Playwright automation, ~312/day</td></tr>
+    <tr><td><code>sleeper_1qb</code></td><td class="num">14</td><td class="num">5,318</td><td>Sleeper 1QB ADP</td></tr>
+    <tr><td><code>sleeper_sf</code></td><td class="num">14</td><td class="num">6,781</td><td>Sleeper Superflex ADP</td></tr>
+  </table>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>player_id</code></td><td>text</td><td>FK &rarr; players</td></tr>
+    <tr><td><code>source</code></td><td>text</td><td>Platform name</td></tr>
+    <tr><td><code>year</code></td><td>integer</td><td>Season year</td></tr>
+    <tr><td><code>date</code></td><td>date</td><td>Snapshot date</td></tr>
+    <tr><td><code>adp</code></td><td>numeric</td><td>Average draft position</td></tr>
+    <tr><td><code>projected_points</code></td><td>numeric</td><td>Nullable</td></tr>
+    <tr><td><code>position_rank</code></td><td>text</td><td>e.g. "RB1" &mdash; nullable</td></tr>
+    <tr><td><code>retrieved_at</code></td><td>timestamptz</td><td>When data was pulled</td></tr>
+  </table>
+</div>
+
+<!-- player_projections -->
+<div class="table-group">
+  <h3><code>player_projections</code> <span class="row-count">25,838 rows</span></h3>
+  <p class="table-desc">Season and weekly stat projections by source. Includes granular passing/rushing/receiving stats plus calculated half-PPR points.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, source, year, season_type)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+    <span class="badge badge-idx">2 indexes</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>player_id</code>, <code>source</code>, <code>year</code>, <code>season_type</code></td><td>text / int</td><td>Composite PK</td></tr>
+    <tr><td><code>games</code></td><td>numeric</td><td>Projected games</td></tr>
+    <tr><td><code>pass_att</code> &hellip; <code>pass_first_downs</code></td><td>numeric</td><td>7 passing stat columns</td></tr>
+    <tr><td><code>rush_att</code> &hellip; <code>rush_first_downs</code></td><td>numeric</td><td>4 rushing stat columns</td></tr>
+    <tr><td><code>targets</code> &hellip; <code>rec_first_downs</code></td><td>numeric</td><td>5 receiving stat columns</td></tr>
+    <tr><td><code>fumbles_lost</code></td><td>numeric</td><td></td></tr>
+    <tr><td><code>half_ppr_pts</code></td><td>numeric</td><td>Calculated half-PPR fantasy points</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="dynasty">3. Dynasty Values &amp; Positional Model</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">Dynasty trade values synced from Google Sheets, change history, future pick values, and a positional adjustment model.</p>
+
+<!-- dynasty_values -->
+<div class="table-group">
+  <h3><code>dynasty_values</code> <span class="row-count">714 rows</span></h3>
+  <p class="table-desc">Current dynasty trade values (1QB + Superflex) for every relevant player. Synced from Google Sheet via Apps Script (full delete + insert). All 714 rows have both 1QB and SF values.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: player_id</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+    <span class="badge badge-rls">RLS: anon SELECT only</span>
+  </div>
+</div>
+
+<!-- dynasty_value_history -->
+<div class="table-group">
+  <h3><code>dynasty_value_history</code> <span class="row-count">764 rows</span></h3>
+  <p class="table-desc">Change log of dynasty value adjustments. Each row records an old&rarr;new value change with editorial comment.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, date)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+  </div>
+</div>
+
+<!-- dynasty_pick_values -->
+<div class="table-group">
+  <h3><code>dynasty_pick_values</code> <span class="row-count">32 rows</span></h3>
+  <p class="table-desc">Future draft pick trade values. 2 years &times; 4 rounds &times; 4 tiers (early/mid/late/random). Manually maintained &mdash; values change rarely.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (year, round, tier)</span>
+  </div>
+</div>
+
+<!-- positional_model_coefficients -->
+<div class="table-group">
+  <h3><code>positional_model_coefficients</code> <span class="row-count">4 rows</span></h3>
+  <p class="table-desc">Linear model coefficients from R multivariate regression. Predicts positional value share (% of total fantasy points above replacement) given 14 league setting variables. One row per position (QB, RB, WR, TE).</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: position</span>
+  </div>
+  <div class="notes">
+    <strong>Usage:</strong> <code>predicted_share = intercept + coef1&times;x1 + &hellip; + coef14&times;x14</code>, then <code>multiplier = baseline_share / predicted_share</code>.
+  </div>
+</div>
+
+<!-- positional_model_baselines -->
+<div class="table-group">
+  <h3><code>positional_model_baselines</code> <span class="row-count">2 rows</span></h3>
+  <p class="table-desc">Default positional value shares for 1QB and Superflex formats. When user settings match baseline, all multipliers = 1.0.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: format ('1qb' | 'sf')</span>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="stats">4. Stats &amp; Teams</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">NFL team and player statistics sourced from nflreadr. PPR variants are Postgres generated columns.</p>
+
+<!-- teams -->
+<div class="table-group">
+  <h3><code>teams</code> <span class="row-count">32 rows</span></h3>
+  <p class="table-desc">NFL team reference table. Abbreviations use nflreadr standard (LA not LAR for Rams). Includes up to 4 team colors, logos, and conference info.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: team_abbr</span>
+  </div>
+</div>
+
+<!-- team_game_stats -->
+<div class="table-group">
+  <h3><code>team_game_stats</code> <span class="row-count">5,278 rows</span></h3>
+  <p class="table-desc">
+    One row per team per regular-season game (2016&ndash;2025). Contains offensive and defensive stats by category,
+    Vegas lines, and positional breakdowns. PPR variants are <strong>Postgres generated columns</strong> (auto-computed from standard FP + receptions).
+  </p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (game_id, team)</span>
+    <span class="badge badge-gen">24 generated columns</span>
+    <span class="badge badge-idx">3 indexes</span>
+  </div>
+  <table>
+    <tr><th>Season</th><th class="num">Games</th><th>Notes</th></tr>
+    <tr><td>2016&ndash;2020</td><td class="num">512/yr</td><td>16-game seasons (32 teams &times; 16)</td></tr>
+    <tr><td>2021, 2023&ndash;2025</td><td class="num">544/yr</td><td>17-game seasons (32 &times; 17)</td></tr>
+    <tr><td>2022</td><td class="num">542</td><td>Bills&ndash;Bengals cancellation</td></tr>
+  </table>
+  <div class="notes">
+    <strong>Scoring:</strong> <code>half_ppr = standard + 0.5 &times; receptions</code>, <code>full_ppr = standard + 1.0 &times; receptions</code>.
+    Passing and rushing FP are identical across formats &mdash; only receiving (and totals) change.
+  </div>
+</div>
+
+<!-- player_stats -->
+<div class="table-group">
+  <h3><code>player_stats</code> <span class="row-count">59,328 rows</span></h3>
+  <p class="table-desc">
+    One row per player per regular-season week (2016&ndash;2025). Only includes players in the <code>players</code> table (FK enforced).
+    PPR variants are generated columns.
+  </p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: (player_id, season, week)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+    <span class="badge badge-gen">2 generated columns</span>
+    <span class="badge badge-idx">3 indexes</span>
+  </div>
+  <table>
+    <tr><th>Season</th><th class="num">Players</th><th class="num">Rows</th></tr>
+    <tr><td>2016</td><td class="num">427</td><td class="num">4,913</td></tr>
+    <tr><td>2017</td><td class="num">513</td><td class="num">5,725</td></tr>
+    <tr><td>2018</td><td class="num">582</td><td class="num">5,913</td></tr>
+    <tr><td>2019</td><td class="num">581</td><td class="num">5,896</td></tr>
+    <tr><td>2020</td><td class="num">616</td><td class="num">6,113</td></tr>
+    <tr><td>2021</td><td class="num">630</td><td class="num">6,278</td></tr>
+    <tr><td>2022</td><td class="num">610</td><td class="num">6,204</td></tr>
+    <tr><td>2023</td><td class="num">590</td><td class="num">6,177</td></tr>
+    <tr><td>2024</td><td class="num">576</td><td class="num">6,081</td></tr>
+    <tr><td>2025</td><td class="num">570</td><td class="num">6,028</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="fbg">5. FBG Bowl</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">
+  Footballguys Bowl &mdash; 12-team Sleeper-based competition. Complete ETL for 2024 and 2025 seasons.
+  576 leagues, 6,900 rosters.
+</p>
+
+<div class="table-group">
+  <h3>FBG Bowl Tables</h3>
+  <table>
+    <tr><th>Table</th><th class="num">Rows</th><th>Purpose</th></tr>
+    <tr><td><code>fbg_bowl_leagues</code></td><td class="num">576</td><td>League metadata from Sleeper (417 for 2025, 159 for 2024)</td></tr>
+    <tr><td><code>fbg_bowl_rosters</code></td><td class="num">6,900</td><td>Rosters with Sleeper user IDs and display names</td></tr>
+    <tr><td><code>fbg_bowl_weekly_results</code></td><td class="num">96,323</td><td>Per-roster per-week scores (weeks 1&ndash;14)</td></tr>
+    <tr><td><code>fbg_bowl_standings</code></td><td class="num">96,600</td><td>Cumulative standings after each week</td></tr>
+    <tr><td><code>fbg_bowl_playoff_results</code></td><td class="num">6,645</td><td>Playoff weeks 15&ndash;17 (qualified teams only)</td></tr>
+    <tr><td><code>fbg_bowl_draft_picks</code></td><td class="num">138,500</td><td>Every draft pick across all FBG Bowl leagues</td></tr>
+    <tr><td><code>fbg_bowl_scores</code></td><td class="num">6,900</td><td>Final meta-scores for overall ranking</td></tr>
+  </table>
+  <div class="notes">
+    <strong>Scoring formula:</strong> 1 pt/win + league bonus (35 for 1st, 10 for 2nd) + semi bonus (35, week 16) + finals bonus (35, week 17) + top-10 bonus (300/200/150/125/100/85/70/55/45/35).<br>
+    <strong>Playoff qualification:</strong> league_rank &le; 2 OR pts_for &ge; 1920 after week 14.
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="sleeper">6. Sleeper Data</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">
+  Sleeper dynasty league data: trade transactions, draft picks, and ADP summaries.
+  Sourced from <code>~/dev/sleeper-scrape/sleeper.db</code> (SQLite).
+</p>
+
+<div class="table-group">
+  <h3>Sleeper Tables</h3>
+  <table>
+    <tr><th>Table</th><th class="num">Rows</th><th>Purpose</th></tr>
+    <tr><td><code>sleeper_leagues</code></td><td class="num">13,202</td><td>Dynasty leagues (2026 season, pick_trading enabled)</td></tr>
+    <tr><td><code>sleeper_trades</code></td><td class="num">30,631</td><td>Completed trades with league/week/timestamp</td></tr>
+    <tr><td><code>sleeper_trade_assets</code></td><td class="num">127,525</td><td>Individual assets: 54,413 players + 73,112 picks</td></tr>
+    <tr><td><code>sleeper_drafts</code></td><td class="num">646</td><td>Draft metadata (type, settings)</td></tr>
+    <tr><td><code>sleeper_draft_picks</code></td><td class="num">203,998</td><td>Individual draft picks with player mappings</td></tr>
+    <tr><td><code>sleeper_adp_summary</code></td><td class="num">4,710</td><td>Aggregated ADP from Sleeper rookie drafts</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="ref">7. Reference Tables</h2>
+
+<div class="table-group">
+  <h3><code>colleges</code> <span class="row-count">738 rows</span></h3>
+  <p class="table-desc">College reference data from ESPN. Includes mascot, conference, division, colors, and logos. Join via <code>players.college = colleges.school</code>. Player college names normalized to match (Ole Miss, NC State, Miami, BYU, Pittsburgh).</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: school</span>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="content">8. Content &amp; News</h2>
+
+<!-- player_notes -->
+<div class="table-group">
+  <h3><code>player_notes</code> <span class="row-count">326 rows</span></h3>
+  <p class="table-desc">Dynasty-focused player writeups (neutral tone). All players with dynasty value &ge; 2. Managed via YAML file &rarr; <code>push_writeups.py</code>.</p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: player_id</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+  </div>
+</div>
+
+<!-- news_items -->
+<div class="table-group">
+  <h3><code>news_items</code> <span class="row-count">1 row</span></h3>
+  <p class="table-desc">
+    FF Intel System news pipeline. Lifecycle: draft &rarr; approved &rarr; published.
+    Anon users can only read published items. Currently has 1 approved item.
+  </p>
+  <div class="table-meta">
+    <span class="badge badge-pk">PK: id (uuid)</span>
+    <span class="badge badge-fk">FK &rarr; players</span>
+    <span class="badge badge-rls">RLS: anon SELECT published only</span>
+  </div>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>id</code></td><td>uuid</td><td>PK, auto-generated</td></tr>
+    <tr><td><code>player_id</code></td><td>text</td><td>FK &rarr; players</td></tr>
+    <tr><td><code>source_url</code></td><td>text</td><td>UNIQUE &mdash; deduplication key</td></tr>
+    <tr><td><code>source_type</code></td><td>text</td><td>tweet, article, video, podcast, other</td></tr>
+    <tr><td><code>news_type</code></td><td>text</td><td>injury, depth_chart, trade, contract, scheme, coaching, offseason, performance, other</td></tr>
+    <tr><td><code>headline</code></td><td>text</td><td>Short headline (NOT NULL)</td></tr>
+    <tr><td><code>importance</code></td><td>int</td><td>1&ndash;10 scale</td></tr>
+    <tr><td><code>status</code></td><td>text</td><td>draft / approved / published</td></tr>
+    <tr><td><code>cascade_flags</code></td><td>jsonb</td><td>Downstream update triggers</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="players-completeness">9. Player Column Completeness</h2>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">Coverage of all 39 columns across 1,815 player records.</p>
+
+<div class="table-group">
+  <h3>Core Fields</h3>
+  <table>
+    <tr><th>Column</th><th class="num">Filled</th><th style="width:40%">Coverage</th></tr>
+    <tr><td><code>player_id</code></td><td class="num">1,815</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:100%"></div></div><span class="pct">100%</span></div></td></tr>
+    <tr><td><code>last_name</code></td><td class="num">1,815</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:100%"></div></div><span class="pct">100%</span></div></td></tr>
+    <tr><td><code>position</code></td><td class="num">1,815</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:100%"></div></div><span class="pct">100%</span></div></td></tr>
+    <tr><td><code>first_name</code></td><td class="num">1,813</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:99.9%"></div></div><span class="pct">99.9%</span></div></td></tr>
+    <tr><td><code>college</code></td><td class="num">1,642</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:90.5%"></div></div><span class="pct">90.5%</span></div></td></tr>
+    <tr><td><code>birth_date</code></td><td class="num">1,641</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:90.4%"></div></div><span class="pct">90.4%</span></div></td></tr>
+    <tr><td><code>draft_year</code></td><td class="num">1,629</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:89.8%"></div></div><span class="pct">89.8%</span></div></td></tr>
+    <tr><td><code>latest_team</code></td><td class="num">1,605</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:88.4%"></div></div><span class="pct">88.4%</span></div></td></tr>
+    <tr><td><code>headshot_url</code></td><td class="num">1,609</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:88.6%"></div></div><span class="pct">88.6%</span></div></td></tr>
+    <tr><td><code>status</code></td><td class="num">1,559</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:85.9%"></div></div><span class="pct">85.9%</span></div></td></tr>
+    <tr><td><code>height</code></td><td class="num">1,199</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:66.1%"></div></div><span class="pct">66.1%</span></div></td></tr>
+    <tr><td><code>weight</code></td><td class="num">1,199</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:66.1%"></div></div><span class="pct">66.1%</span></div></td></tr>
+    <tr><td><code>draft_round</code></td><td class="num">1,013</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:55.8%"></div></div><span class="pct">55.8%</span></div></td></tr>
+    <tr><td><code>draft_pick</code></td><td class="num">1,013</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:55.8%"></div></div><span class="pct">55.8%</span></div></td></tr>
+    <tr><td><code>dan_id</code></td><td class="num">714</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill low" style="width:39.3%"></div></div><span class="pct">39.3%</span></div></td></tr>
+  </table>
+</div>
+
+<div class="table-group">
+  <h3>Cross-Platform IDs</h3>
+  <table>
+    <tr><th>Column</th><th class="num">Filled</th><th style="width:40%">Coverage</th></tr>
+    <tr><td><code>sleeper_id</code></td><td class="num">1,716</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:94.5%"></div></div><span class="pct">94.5%</span></div></td></tr>
+    <tr><td><code>fantasy_data_id</code></td><td class="num">1,635</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:90.1%"></div></div><span class="pct">90.1%</span></div></td></tr>
+    <tr><td><code>rotowire_id</code></td><td class="num">1,623</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:89.4%"></div></div><span class="pct">89.4%</span></div></td></tr>
+    <tr><td><code>stats_id</code></td><td class="num">1,585</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:87.3%"></div></div><span class="pct">87.3%</span></div></td></tr>
+    <tr><td><code>espn_id</code></td><td class="num">1,573</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:86.7%"></div></div><span class="pct">86.7%</span></div></td></tr>
+    <tr><td><code>stats_global_id</code></td><td class="num">1,548</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:85.3%"></div></div><span class="pct">85.3%</span></div></td></tr>
+    <tr><td><code>mfl_id</code></td><td class="num">1,548</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:85.3%"></div></div><span class="pct">85.3%</span></div></td></tr>
+    <tr><td><code>cbs_id</code></td><td class="num">1,539</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:84.8%"></div></div><span class="pct">84.8%</span></div></td></tr>
+    <tr><td><code>gsis_id</code></td><td class="num">1,532</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:84.4%"></div></div><span class="pct">84.4%</span></div></td></tr>
+    <tr><td><code>fantasypros_id</code></td><td class="num">1,515</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:83.5%"></div></div><span class="pct">83.5%</span></div></td></tr>
+    <tr><td><code>pff_id</code></td><td class="num">1,512</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:83.3%"></div></div><span class="pct">83.3%</span></div></td></tr>
+    <tr><td><code>pfr_id</code></td><td class="num">1,503</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:82.8%"></div></div><span class="pct">82.8%</span></div></td></tr>
+    <tr><td><code>yahoo_id</code></td><td class="num">1,486</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill high" style="width:81.9%"></div></div><span class="pct">81.9%</span></div></td></tr>
+    <tr><td><code>draftkings_id</code></td><td class="num">1,192</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:65.7%"></div></div><span class="pct">65.7%</span></div></td></tr>
+    <tr><td><code>sportsdata_id</code></td><td class="num">1,135</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:62.5%"></div></div><span class="pct">62.5%</span></div></td></tr>
+    <tr><td><code>footballguys_id</code></td><td class="num">1,135</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:62.5%"></div></div><span class="pct">62.5%</span></div></td></tr>
+    <tr><td><code>drafters_id</code></td><td class="num">1,133</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:62.4%"></div></div><span class="pct">62.4%</span></div></td></tr>
+    <tr><td><code>fanduel_id</code></td><td class="num">1,119</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:61.7%"></div></div><span class="pct">61.7%</span></div></td></tr>
+    <tr><td><code>swish_id</code></td><td class="num">1,111</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:61.2%"></div></div><span class="pct">61.2%</span></div></td></tr>
+    <tr><td><code>underdog_id</code></td><td class="num">1,041</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill mid" style="width:57.4%"></div></div><span class="pct">57.4%</span></div></td></tr>
+    <tr><td><code>cfbref_id</code></td><td class="num">878</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill low" style="width:48.4%"></div></div><span class="pct">48.4%</span></div></td></tr>
+    <tr><td><code>rotoworld_id</code></td><td class="num">878</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill low" style="width:48.4%"></div></div><span class="pct">48.4%</span></div></td></tr>
+    <tr><td><code>ktc_id</code></td><td class="num">455</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill vlow" style="width:25.1%"></div></div><span class="pct">25.1%</span></div></td></tr>
+    <tr><td><code>fleaflicker_id</code></td><td class="num">70</td><td><div class="bar-wrap"><div class="bar"><div class="bar-fill vlow" style="width:3.9%"></div></div><span class="pct">3.9%</span></div></td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="views">10. Views</h2>
+
+<div class="table-group">
+  <table>
+    <tr><th>View</th><th>Purpose</th><th>Key Joins</th></tr>
+    <tr>
+      <td><code>view_draft_board</code></td>
+      <td>Pre-joined draft board for the app. Combines picks, players, teams, and season data.</td>
+      <td><code>draft_picks</code> &rarr; <code>players</code> &rarr; <code>league_teams</code> &rarr; <code>player_seasons</code></td>
+    </tr>
+    <tr>
+      <td><code>team_season_stats</code></td>
+      <td>Season-level aggregates of <code>team_game_stats</code>. Per-game averages and SDs for all scoring formats. ~320 rows (32 teams &times; 10 seasons).</td>
+      <td><code>team_game_stats</code> grouped by (team, season)</td>
+    </tr>
+    <tr>
+      <td><code>player_season_stats</code></td>
+      <td>Season aggregates of <code>player_stats</code>. Joins to <code>players</code> for names. Separate rows per team for traded players.</td>
+      <td><code>player_stats</code> &rarr; <code>players</code>, grouped by (player_id, team, season)</td>
+    </tr>
+  </table>
+  <div class="notes">All views use <code>security_invoker = true</code> &mdash; they respect the caller's RLS policies.</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="indexes">11. Index Catalog</h2>
+<p style="color:var(--text-muted); margin-bottom:1rem;">77 indexes across 33 tables. Primary keys omitted for brevity &mdash; showing custom indexes only.</p>
+
+<div class="table-group">
+  <table>
+    <tr><th>Table</th><th>Index</th><th>Columns / Notes</th></tr>
+    <tr><td><code>adp</code></td><td><code>idx_adp_player_id</code></td><td>(player_id)</td></tr>
+    <tr><td><code>adp_sources</code></td><td><code>idx_adp_sources_date</code></td><td>(date DESC)</td></tr>
+    <tr><td><code>adp_sources</code></td><td><code>idx_adp_sources_source_year_date</code></td><td>(source, year, date DESC)</td></tr>
+    <tr><td><code>draft_picks</code></td><td><code>idx_draft_picks_league_team</code></td><td>(league_id, team_id)</td></tr>
+    <tr><td><code>draft_picks</code></td><td><code>idx_draft_picks_player_id</code></td><td>(player_id)</td></tr>
+    <tr><td><code>draft_picks</code></td><td><code>idx_draft_picks_year_round</code></td><td>(year, round)</td></tr>
+    <tr><td><code>dynasty_value_history</code></td><td><code>idx_dvh_date</code></td><td>(date)</td></tr>
+    <tr><td><code>dynasty_values</code></td><td><code>idx_dynasty_values_updated</code></td><td>(updated_at)</td></tr>
+    <tr><td><code>fbg_bowl_draft_picks</code></td><td><code>idx_fbg_picks_league</code></td><td>(league_id)</td></tr>
+    <tr><td><code>fbg_bowl_draft_picks</code></td><td><code>idx_fbg_picks_player</code></td><td>(sleeper_player_id)</td></tr>
+    <tr><td><code>fbg_bowl_playoff_results</code></td><td><code>idx_fbg_playoff_roster</code></td><td>(roster_id)</td></tr>
+    <tr><td><code>fbg_bowl_rosters</code></td><td><code>idx_fbg_rosters_league</code></td><td>(league_id)</td></tr>
+    <tr><td><code>fbg_bowl_scores</code></td><td><code>idx_fbg_scores_rank</code></td><td>(overall_rank)</td></tr>
+    <tr><td><code>fbg_bowl_scores</code></td><td><code>idx_fbg_scores_year</code></td><td>(year)</td></tr>
+    <tr><td><code>fbg_bowl_standings</code></td><td><code>idx_fbg_standings_league_wk</code></td><td>(league_id, week)</td></tr>
+    <tr><td><code>fbg_bowl_standings</code></td><td><code>idx_fbg_standings_roster</code></td><td>(roster_id)</td></tr>
+    <tr><td><code>fbg_bowl_weekly_results</code></td><td><code>idx_fbg_weekly_league_week</code></td><td>(league_id, week)</td></tr>
+    <tr><td><code>fbg_bowl_weekly_results</code></td><td><code>idx_fbg_weekly_roster_week</code></td><td>(roster_id, week)</td></tr>
+    <tr><td><code>league_teams</code></td><td><code>idx_league_teams_league_rank</code></td><td>(league_rank)</td></tr>
+    <tr><td><code>leagues</code></td><td><code>idx_leagues_year</code></td><td>(year)</td></tr>
+    <tr><td><code>news_items</code></td><td><code>idx_news_items_approved_at</code></td><td>(approved_at DESC) WHERE status IN ('approved','published')</td></tr>
+    <tr><td><code>news_items</code></td><td><code>idx_news_items_player_id</code></td><td>(player_id)</td></tr>
+    <tr><td><code>news_items</code></td><td><code>idx_news_items_status</code></td><td>(status)</td></tr>
+    <tr><td><code>player_projections</code></td><td><code>idx_player_projections_source_year</code></td><td>(source, year)</td></tr>
+    <tr><td><code>player_projections</code></td><td><code>idx_pp_source_year_week</code></td><td>(source, year, week)</td></tr>
+    <tr><td><code>player_seasons</code></td><td><code>idx_player_seasons_year</code></td><td>(year)</td></tr>
+    <tr><td><code>player_stats</code></td><td><code>idx_ps_position_season</code></td><td>(position, season)</td></tr>
+    <tr><td><code>player_stats</code></td><td><code>idx_ps_season_week</code></td><td>(season, week)</td></tr>
+    <tr><td><code>player_stats</code></td><td><code>idx_ps_team_season</code></td><td>(team, season)</td></tr>
+    <tr><td><code>players</code></td><td><code>idx_players_dan_id</code></td><td>(dan_id) WHERE dan_id IS NOT NULL &mdash; unique partial</td></tr>
+    <tr><td><code>players</code></td><td><code>idx_players_position</code></td><td>(position)</td></tr>
+    <tr><td><code>sleeper_draft_picks</code></td><td><code>idx_sleeper_draft_picks_draft</code></td><td>(draft_id)</td></tr>
+    <tr><td><code>sleeper_draft_picks</code></td><td><code>idx_sleeper_draft_picks_player</code></td><td>(sleeper_player_id)</td></tr>
+    <tr><td><code>sleeper_drafts</code></td><td><code>idx_sleeper_drafts_league</code></td><td>(league_id)</td></tr>
+    <tr><td><code>sleeper_drafts</code></td><td><code>idx_sleeper_drafts_type</code></td><td>(type)</td></tr>
+    <tr><td><code>sleeper_trade_assets</code></td><td><code>idx_sleeper_trade_assets_player</code></td><td>(sleeper_player_id) WHERE asset_type = 'player'</td></tr>
+    <tr><td><code>sleeper_trade_assets</code></td><td><code>idx_sleeper_trade_assets_txn</code></td><td>(transaction_id)</td></tr>
+    <tr><td><code>sleeper_trades</code></td><td><code>idx_sleeper_trades_league</code></td><td>(league_id)</td></tr>
+    <tr><td><code>sleeper_trades</code></td><td><code>idx_sleeper_trades_season_week</code></td><td>(season, week)</td></tr>
+    <tr><td><code>team_game_stats</code></td><td><code>idx_tgs_opponent_season</code></td><td>(opponent, season)</td></tr>
+    <tr><td><code>team_game_stats</code></td><td><code>idx_tgs_season_week</code></td><td>(season, week)</td></tr>
+    <tr><td><code>team_game_stats</code></td><td><code>idx_tgs_team_season</code></td><td>(team, season)</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="rls">12. RLS &amp; Security</h2>
+
+<div class="table-group">
+  <table>
+    <tr><th>Table(s)</th><th>Anon SELECT</th><th>Anon INSERT</th><th>Service Role</th></tr>
+    <tr><td>All tables (default)</td><td style="color:var(--green)">Yes</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Full (bypasses RLS)</td></tr>
+    <tr><td><code>adp_sources</code></td><td style="color:var(--green)">Yes</td><td style="color:var(--green)">Yes</td><td style="color:var(--green)">Full</td></tr>
+    <tr><td><code>news_items</code></td><td style="color:var(--yellow)">Published only</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Full</td></tr>
+  </table>
+  <div class="notes">
+    <strong>Note:</strong> The <code>postgres</code> role is subject to RLS. Use <code>pg_stat_user_tables.n_live_tup</code> for row counts.
+    All writes (except <code>adp_sources</code>) require <code>SUPABASE_SERVICE_ROLE_KEY</code>.
+    Views use <code>security_invoker = true</code>.
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2 id="er">13. Entity Relationships</h2>
+
+<div class="er-diagram"><span class="entity">players</span> (PK: player_id)
+  ├─&lt; <span class="entity">draft_picks</span> (player_id)
+  ├─&lt; <span class="entity">adp</span> (player_id, year)
+  ├─&lt; <span class="entity">adp_sources</span> (player_id, source, year, date)
+  ├─&lt; <span class="entity">player_stats</span> (player_id, season, week)
+  ├─&lt; <span class="entity">player_seasons</span> (player_id, year)
+  ├─&lt; <span class="entity">player_projections</span> (player_id, source, year, season_type)
+  ├── <span class="entity">dynasty_values</span> (player_id)                      <span class="relation">1:1</span>
+  ├─&lt; <span class="entity">dynasty_value_history</span> (player_id, date)
+  ├── <span class="entity">player_notes</span> (player_id)                        <span class="relation">1:1</span>
+  ├─&lt; <span class="entity">news_items</span> (player_id)
+  └──&gt; <span class="entity">colleges</span> (players.college = colleges.school)   <span class="relation">lookup</span>
+
+<span class="entity">leagues</span> (PK: league_id)
+  ├─&lt; <span class="entity">league_teams</span> (league_id, team_id)
+  └─&lt; <span class="entity">draft_picks</span> (league_id, overall_pick)
+       └──&gt; <span class="entity">league_teams</span> (league_id, team_id)        <span class="relation">FK</span>
+
+<span class="entity">teams</span> (PK: team_abbr)
+  <span class="relation">(no FK from players.latest_team — too rigid for FA/NULL/historical)</span>
+
+<span class="entity">team_game_stats</span> (PK: game_id, team)                    <span class="relation">standalone</span>
+
+<span class="entity">fbg_bowl_leagues</span>
+  ├─&lt; <span class="entity">fbg_bowl_rosters</span>
+  │    ├─&lt; <span class="entity">fbg_bowl_weekly_results</span>
+  │    ├─&lt; <span class="entity">fbg_bowl_standings</span>
+  │    ├─&lt; <span class="entity">fbg_bowl_playoff_results</span>
+  │    └─&lt; <span class="entity">fbg_bowl_scores</span>
+  └─&lt; <span class="entity">fbg_bowl_draft_picks</span>
+       └──&gt; <span class="entity">players</span> (sleeper_player_id = sleeper_id)  <span class="relation">93.3% match</span>
+
+<span class="entity">sleeper_leagues</span> (PK: league_id)
+  ├─&lt; <span class="entity">sleeper_trades</span> (league_id)
+  │    └─&lt; <span class="entity">sleeper_trade_assets</span> (transaction_id)
+  │         └──&gt; <span class="entity">players</span> (sleeper_player_id = sleeper_id)
+  └─&lt; <span class="entity">sleeper_drafts</span> (league_id)
+       └─&lt; <span class="entity">sleeper_draft_picks</span> (draft_id)
+
+<span class="entity">dynasty_pick_values</span> (year, round, tier)                <span class="relation">standalone</span>
+<span class="entity">positional_model_coefficients</span> (position)               <span class="relation">standalone</span>
+<span class="entity">positional_model_baselines</span> (format)                    <span class="relation">standalone</span>
+<span class="entity">sleeper_adp_summary</span>                                    <span class="relation">standalone</span>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ -->
+<h2>Row Count Summary</h2>
+
+<div class="table-group">
+  <table>
+    <tr><th>Table</th><th class="num">Rows</th><th>Domain</th></tr>
+    <tr><td><code>draft_picks</code></td><td class="num">618,856</td><td>NFFC Drafts</td></tr>
+    <tr><td><code>sleeper_draft_picks</code></td><td class="num">203,998</td><td>Sleeper</td></tr>
+    <tr><td><code>fbg_bowl_draft_picks</code></td><td class="num">138,500</td><td>FBG Bowl</td></tr>
+    <tr><td><code>sleeper_trade_assets</code></td><td class="num">127,525</td><td>Sleeper</td></tr>
+    <tr><td><code>fbg_bowl_standings</code></td><td class="num">96,600</td><td>FBG Bowl</td></tr>
+    <tr><td><code>fbg_bowl_weekly_results</code></td><td class="num">96,323</td><td>FBG Bowl</td></tr>
+    <tr><td><code>adp_sources</code></td><td class="num">75,663</td><td>ADP</td></tr>
+    <tr><td><code>player_stats</code></td><td class="num">59,328</td><td>Stats</td></tr>
+    <tr><td><code>league_teams</code></td><td class="num">31,548</td><td>NFFC</td></tr>
+    <tr><td><code>sleeper_trades</code></td><td class="num">30,631</td><td>Sleeper</td></tr>
+    <tr><td><code>player_projections</code></td><td class="num">25,838</td><td>Projections</td></tr>
+    <tr><td><code>sleeper_leagues</code></td><td class="num">13,202</td><td>Sleeper</td></tr>
+    <tr><td><code>fbg_bowl_rosters</code></td><td class="num">6,900</td><td>FBG Bowl</td></tr>
+    <tr><td><code>fbg_bowl_scores</code></td><td class="num">6,900</td><td>FBG Bowl</td></tr>
+    <tr><td><code>fbg_bowl_playoff_results</code></td><td class="num">6,645</td><td>FBG Bowl</td></tr>
+    <tr><td><code>player_seasons</code></td><td class="num">6,060</td><td>Core</td></tr>
+    <tr><td><code>adp</code></td><td class="num">5,339</td><td>NFFC ADP</td></tr>
+    <tr><td><code>team_game_stats</code></td><td class="num">5,278</td><td>Stats</td></tr>
+    <tr><td><code>sleeper_adp_summary</code></td><td class="num">4,710</td><td>Sleeper</td></tr>
+    <tr><td><code>leagues</code></td><td class="num">2,629</td><td>NFFC</td></tr>
+    <tr><td><code>players</code></td><td class="num">1,815</td><td>Core</td></tr>
+    <tr><td><code>dynasty_value_history</code></td><td class="num">764</td><td>Dynasty</td></tr>
+    <tr><td><code>colleges</code></td><td class="num">738</td><td>Reference</td></tr>
+    <tr><td><code>dynasty_values</code></td><td class="num">714</td><td>Dynasty</td></tr>
+    <tr><td><code>sleeper_drafts</code></td><td class="num">646</td><td>Sleeper</td></tr>
+    <tr><td><code>fbg_bowl_leagues</code></td><td class="num">576</td><td>FBG Bowl</td></tr>
+    <tr><td><code>player_notes</code></td><td class="num">326</td><td>Content</td></tr>
+    <tr><td><code>teams</code></td><td class="num">32</td><td>Reference</td></tr>
+    <tr><td><code>dynasty_pick_values</code></td><td class="num">32</td><td>Dynasty</td></tr>
+    <tr><td><code>positional_model_coefficients</code></td><td class="num">4</td><td>Model</td></tr>
+    <tr><td><code>positional_model_baselines</code></td><td class="num">2</td><td>Model</td></tr>
+    <tr><td><code>news_items</code></td><td class="num">1</td><td>Content</td></tr>
+    <tr style="font-weight:700; border-top:2px solid var(--border)"><td>Total</td><td class="num">1,558,897</td><td></td></tr>
+  </table>
+</div>
+
+<p style="color:var(--text-muted); text-align:center; margin-top:3rem; font-size:0.8rem;">
+  Generated April 1, 2026 &mdash; NFL Database &mdash; Supabase project <code>twfzcrodldvhpfaykasj</code>
+</p>
+
+</body>
+</html>

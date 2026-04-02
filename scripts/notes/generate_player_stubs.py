@@ -26,7 +26,7 @@ from datetime import date
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-VAULT_PLAYERS_DIR = "/Users/dan/Documents/ObsidianVault/Fantasy Football/Players"
+VAULT_PLAYERS_DIR = "/Users/dan/obsidian-vault/Fantasy Football/Players"
 
 env_path = os.path.join(ROOT_DIR, ".env")
 if os.path.exists(env_path):

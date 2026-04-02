@@ -6,7 +6,7 @@ NFL Database — central repo for managing the Supabase database used across all
 
 ## Obsidian Vault — Sync Rules
 
-Vault path: `/Users/dan/Documents/ObsidianVault/Fantasy Football/`
+Vault path: `/Users/dan/obsidian-vault/Fantasy Football/`
 
 **Always update the vault proactively — without waiting to be asked — whenever any of the following happen:**
 
@@ -820,6 +820,28 @@ Individual assets (players and draft picks) within each trade. Multiple rows per
 
 66,927 rows: 26,682 player assets + 40,245 pick assets. Join players via `sleeper_player_id = players.sleeper_id`.
 
+#### `news_items`
+News and intel items for the FF Intel System. Pipeline: draft → approved → published. Anon can only read published items.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | Default `gen_random_uuid()` |
+| `player_id` | text NOT NULL | FK → players |
+| `team_abbr` | text | NFL team abbreviation (nullable) |
+| `source_url` | text UNIQUE | Deduplication key |
+| `source_type` | text | CHECK: 'tweet', 'article', 'video', 'podcast', 'other' |
+| `news_type` | text | CHECK: 'injury', 'depth_chart', 'trade', 'contract', 'scheme', 'coaching', 'offseason', 'performance', 'other' |
+| `headline` | text NOT NULL | Short headline |
+| `summary` | text | Longer summary (nullable) |
+| `raw_content` | text | Original source content (nullable) |
+| `importance` | int | 1–10 scale, CHECK constraint |
+| `importance_note` | text | Why this importance level (nullable) |
+| `published_at` | timestamptz | When originally published at source |
+| `approved_at` | timestamptz | When approved for display |
+| `status` | text NOT NULL | Default 'draft'. CHECK: 'draft', 'approved', 'published' |
+| `cascade_flags` | jsonb | Default `'[]'::jsonb` — downstream update triggers |
+| `created_at` | timestamptz NOT NULL | Default `now()` — when item entered pipeline |
+
 ### Views
 
 #### `view_draft_board`
@@ -872,11 +894,14 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 | `idx_sleeper_trades_season_week` | sleeper_trades | (season, week) |
 | `idx_sleeper_trade_assets_txn` | sleeper_trade_assets | (transaction_id) |
 | `idx_sleeper_trade_assets_player` | sleeper_trade_assets | (sleeper_player_id) WHERE asset_type = 'player' |
+| `idx_news_items_player_id` | news_items | (player_id) |
+| `idx_news_items_status` | news_items | (status) |
+| `idx_news_items_approved_at` | news_items | (approved_at DESC) WHERE status IN ('approved', 'published') |
 
 ### RLS
 
 All tables: RLS enabled. Policies:
-- **SELECT**: Public (anon can read all tables)
+- **SELECT**: Public (anon can read all tables). Exception: `news_items` — anon can only read rows with `status = 'published'`
 - **INSERT**: Only `adp_sources` allows anon insert. `dynasty_values` does NOT (writes via service role key from Apps Script)
 - **All other writes**: Use `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS)
 
@@ -913,6 +938,7 @@ All tables: RLS enabled. Policies:
 26. `create_player_notes` — Player writeup table (PK player_id, FK → players) + RLS (anon SELECT only)
 27. `create_fbg_bowl_tables` — 7 FBG Bowl tables (leagues, rosters, weekly_results, standings, playoff_results, draft_picks, scores) + RLS + indexes. Applied via pg8000 (Management API blocked by Cloudflare).
 28. `create_sleeper_trade_tables` — 3 Sleeper trade tables (sleeper_leagues, sleeper_trades, sleeper_trade_assets) + 4 indexes + RLS. Applied via pg8000.
+29. `create_news_items` — News/intel pipeline table with 3 indexes + RLS (anon SELECT published only, service role full access)
 
 Applied via direct SQL (not tracked in migration system):
 - College name normalization — UPDATE players: Mississippi→Ole Miss, North Carolina State→NC State, Pittsburg→Pittsburgh, Virgina Tech→Virginia Tech, Miami (FL)→Miami, Brigham Young→BYU
@@ -953,6 +979,7 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `sleeper_leagues` | 12,629 (2026 dynasty leagues) |
 | `sleeper_trades` | 15,509 (from 3,972 leagues, Dec 2025 – Mar 2026) |
 | `sleeper_trade_assets` | 66,927 (26,682 players + 40,245 picks) |
+| `news_items` | 0 (new, empty) |
 
 ### Player ID Coverage (1,758 players)
 

@@ -22,7 +22,7 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 SLEEPER_DB_PATH = os.environ.get(
     "SLEEPER_DB_PATH",
-    os.path.expanduser("~/Desktop/sleeper scrape/sleeper.db"),
+    os.path.expanduser("~/dev/sleeper-scrape/sleeper.db"),
 )
 
 

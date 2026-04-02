@@ -23,7 +23,7 @@ import sys
 # ── Config ────────────────────────────────────────────────────────────────────
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 YAML_PATH = os.path.join(ROOT_DIR, "data", "writeups", "player_writeups.yaml")
-VAULT_PLAYERS_DIR = "/Users/dan/Documents/ObsidianVault/Fantasy Football/Players"
+VAULT_PLAYERS_DIR = "/Users/dan/obsidian-vault/Fantasy Football/Players"
 
 COMMENT_LINE = "<!-- Dynasty writeup below. 3-5 sentences. Updated as news develops. -->"
 

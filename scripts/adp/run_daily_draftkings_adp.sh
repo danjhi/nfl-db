@@ -4,7 +4,7 @@
 
 set -e
 
-cd /Users/dan/Desktop/nfl-db
+cd /Users/dan/dev/nfl-db
 
 # Load env vars (needed for DK_CHROME_PROFILE, Supabase keys)
 if [ -f .env ]; then

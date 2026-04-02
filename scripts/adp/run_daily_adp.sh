@@ -11,5 +11,5 @@ if [ "$TODAY" -lt 20260219 ] || [ "$TODAY" -gt 20260422 ]; then
 fi
 
 echo "$(date): Starting Underdog ADP fetch..."
-/usr/bin/python3 /Users/dan/Desktop/nfl-db/scripts/adp/fetch_underdog_adp.py
+/usr/bin/python3 /Users/dan/dev/nfl-db/scripts/adp/fetch_underdog_adp.py
 echo "$(date): Done."

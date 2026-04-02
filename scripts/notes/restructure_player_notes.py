@@ -16,7 +16,7 @@ import os
 import re
 import sys
 
-VAULT_PLAYERS_DIR = "/Users/dan/Documents/ObsidianVault/Fantasy Football/Players"
+VAULT_PLAYERS_DIR = "/Users/dan/obsidian-vault/Fantasy Football/Players"
 COMMENT_PATTERN = re.compile(r'^<!-- Dynasty writeup below\..*?-->\s*$', re.MULTILINE)
 BESTBALL_COMMENT = "<!-- Best ball writeup. Weekly variance, stacking, correlation, exposure. -->"
 

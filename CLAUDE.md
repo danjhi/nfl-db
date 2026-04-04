@@ -101,6 +101,8 @@ Scripts are organized by data source.
 | `load_teams.py` | Load teams CSV into Supabase teams table via REST API |
 | `build_team_game_stats.R` | Build team-game-level stats from nflreadr (2016-2025) → `data/nflreadr/team_game_stats.csv` |
 | `load_team_game_stats.py` | Load team game stats CSV into Supabase (excludes generated columns from payload) |
+| `create_team_advanced_stats.sql` | DDL for team_advanced_stats table (efficiency, red zone, scheme, PROE, pressure + league ranks) |
+| `load_team_advanced_stats.py` | Merge 5 nflverse CSVs, compute league ranks (1-32), upsert into team_advanced_stats. Supports `--dry-run`, `--csv-only` |
 
 ### Player Stats (`scripts/stats/`)
 
@@ -304,6 +306,7 @@ SportsData.io Players → enrich_from_sportsdata.py → Supabase players (height
 
 nflreadr (R) → export_teams.R → data/nflreadr/teams.csv → load_teams.py → Supabase teams table
 nflreadr (R) → build_team_game_stats.R → data/nflreadr/team_game_stats.csv → load_team_game_stats.py → Supabase team_game_stats
+nflverse CSVs (~/dev/2026-nfl-projections/data/nflverse/) → load_team_advanced_stats.py → Supabase team_advanced_stats (160 rows, 5 seasons)
 nflreadr (R) → build_player_stats.R → data/nflreadr/player_stats.csv → load_player_stats.py → Supabase player_stats
 
 FBG preseason API → fetch_fbg_projections.py → Supabase player_projections (half-PPR season projections)
@@ -625,6 +628,47 @@ One row per team per regular-season game (2016-2025). PPR variants are **Postgre
 
 **Scoring formula**: `half_ppr = standard + 0.5 × receptions`, `full_ppr = standard + 1.0 × receptions`. Passing and rushing FP are identical across all formats — only receiving (and totals) change.
 
+#### `team_advanced_stats`
+
+One row per team per season (2021-2025). Season-level advanced analytics merged from 5 nflverse CSVs. Every stat column has a corresponding `{col}_rank` column (1-32, 1=best for that stat's context).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `team` | text | nflreadr abbreviation (LAR for Rams) |
+| `season` | integer | |
+| **Efficiency** | | From `team_efficiency.csv` |
+| `pass_epa_play` | numeric | Pass EPA per play |
+| `rush_epa_play` | numeric | Rush EPA per play |
+| `cmp_pct` | numeric | Completion percentage |
+| `ypa` | numeric | Yards per attempt |
+| `ypc` | numeric | Yards per carry |
+| `cpoe` | numeric | Completion % over expected |
+| `sack_rate` | numeric | Sack rate |
+| `pass_att`..`rush_td` | int/numeric | Raw totals + per-game rates (16 columns) |
+| **Red Zone** | | From `red_zone_stats.csv` |
+| `rz_trips` | integer | Red zone trips |
+| `rz_td_rate` | numeric | TD rate on RZ trips |
+| `rz_trip_td_rate` | numeric | Trip-level TD conversion rate |
+| `rz_epa_play` | numeric | RZ EPA per play |
+| `i10_plays`, `i10_td`, `i10_td_rate` | int/numeric | Inside-10 stats |
+| **Scheme** | | From `scheme_stats.csv` |
+| `play_action_rate` | numeric | Play action usage rate |
+| `motion_rate` | numeric | Pre-snap motion rate |
+| `shotgun_rate`, `pistol_rate`, `under_center_rate` | numeric | Formation rates |
+| `rpo_rate`, `screen_rate`, `no_huddle_rate` | numeric | Play type rates |
+| **Pass Rate** | | From `neutral_pass_rate.csv` |
+| `neutral_pass_rate` | numeric | PROE in neutral game scripts |
+| `leading_pass_rate`, `trailing_pass_rate`, `total_pass_rate` | numeric | Pass rate by game script |
+| **Pressure** | | From `sack_pressure_stats.csv` |
+| `pressure_rate` | numeric | Pressure rate faced |
+| `pocket_time` | numeric | Average pocket time |
+| `blitz_rate_faced`, `hurry_rate`, `hit_rate` | numeric | Pressure breakdown |
+| `drop_rate`, `bad_throw_rate`, `throwaway_rate` | numeric | QB error rates |
+| **Ranks** | | 55 `{col}_rank` integer columns (1=best, 32=worst) |
+| PK | | (team, season) |
+
+Source CSVs: `~/dev/2026-nfl-projections/data/nflverse/`. Team abbreviations normalized (LA→LAR, OAK→LV, SD→LAC, WAS→WSH).
+
 #### `player_stats`
 
 One row per player per regular-season week (2016-2025). PPR variants are **Postgres generated columns**. Loaded from nflreadr `load_player_stats()` via gsis_id → sportradar_id mapping.
@@ -887,6 +931,8 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 | `idx_tgs_team_season` | team_game_stats | (team, season) |
 | `idx_tgs_season_week` | team_game_stats | (season, week) |
 | `idx_tgs_opponent_season` | team_game_stats | (opponent, season) |
+| `idx_tas_season` | team_advanced_stats | (season) |
+| `idx_tas_team` | team_advanced_stats | (team) |
 | `idx_ps_season_week` | player_stats | (season, week) |
 | `idx_ps_team_season` | player_stats | (team, season) |
 | `idx_ps_position_season` | player_stats | (position, season) |
@@ -939,6 +985,7 @@ All tables: RLS enabled. Policies:
 27. `create_fbg_bowl_tables` — 7 FBG Bowl tables (leagues, rosters, weekly_results, standings, playoff_results, draft_picks, scores) + RLS + indexes. Applied via pg8000 (Management API blocked by Cloudflare).
 28. `create_sleeper_trade_tables` — 3 Sleeper trade tables (sleeper_leagues, sleeper_trades, sleeper_trade_assets) + 4 indexes + RLS. Applied via pg8000.
 29. `create_news_items` — News/intel pipeline table with 3 indexes + RLS (anon SELECT published only, service role full access)
+30. `create_team_advanced_stats` — Season-level advanced team analytics (efficiency, red zone, scheme, PROE, pressure) with pre-computed league ranks + 2 indexes + RLS
 
 Applied via direct SQL (not tracked in migration system):
 - College name normalization — UPDATE players: Mississippi→Ole Miss, North Carolina State→NC State, Pittsburg→Pittsburgh, Virgina Tech→Virginia Tech, Miami (FL)→Miami, Brigham Young→BYU
@@ -962,6 +1009,7 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `player_projections` | 443 |
 | `teams` | 32 |
 | `team_game_stats` | 5,278 |
+| `team_advanced_stats` | 160 (32 teams × 5 seasons, 2021-2025) |
 | `player_stats` | 59,328 |
 | `dynasty_value_history` | 706 |
 | `dynasty_pick_values` | 32 |

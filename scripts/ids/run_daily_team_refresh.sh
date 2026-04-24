@@ -4,8 +4,8 @@
 
 TODAY=$(date +%Y%m%d)
 
-# Only run Feb 19 – Apr 22, 2026 (free agency + pre-draft window)
-if [ "$TODAY" -lt 20260219 ] || [ "$TODAY" -gt 20260422 ]; then
+# Only run Feb 19 – Apr 30, 2026 (free agency + draft + early UDFA window)
+if [ "$TODAY" -lt 20260219 ] || [ "$TODAY" -gt 20260430 ]; then
     echo "$(date): Outside date range (${TODAY}), skipping."
     exit 0
 fi

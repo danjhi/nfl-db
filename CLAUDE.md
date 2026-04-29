@@ -122,6 +122,9 @@ Scripts are organized by data source.
 | `load_draftkings_adp.py` | Load DraftKings ADP from manually downloaded CSV → upsert into adp_sources. Auto-finds latest `DkPreDraftRankings*.csv` in ~/Downloads. ADP in overall pick float format. |
 | `setup_dk_session.py` | One-time setup: extract DK cookies from Chrome Profile 2 via `browser_cookie3` → save to `data/dk_session.json`. Re-run when daily fetch returns auth errors (~2 weeks). Chrome must be logged in to DK in Profile 2. |
 | `fetch_draftkings_adp.py` | Daily automated DK ADP fetch → upsert into adp_sources. Uses Playwright Chromium with saved session (loads a DK page to trigger fresh `jwe`, then hits API). Requires `data/dk_session.json` from setup script. |
+| `fetch_underdog_postdraft_adp.py` | **Post-draft** Underdog ADP fetch → upsert into adp_sources (`source="underdog_postdraft"`). Different CSV URL (3 distinct UUIDs vs pre-draft). Matches by `underdog_postdraft_id` first, falls back to name+pos and writes back to `players.underdog_postdraft_id` (first-run backfill). |
+| `fetch_drafters_postdraft_adp.py` | **Post-draft** Drafters ADP fetch → upsert into adp_sources (`source="drafters_postdraft"`). Same `formatId=0` URL as pre-draft, but Drafters changed JSON field shape post-draft (`first_name`→`fn`, `last_name`→`ln`, `position`→`pn`, `nfl_team`→`tn`). New script handles new shape. |
+| `fetch_draftkings_postdraft_adp.py` | **Post-draft** DK ADP fetch → upsert into adp_sources (`source="draftkings_postdraft"`). Different draftgroup ID (`146136` vs `141336` pre-draft). Reuses existing `data/dk_session.json` (same DK login). |
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
 
@@ -296,6 +299,10 @@ Drafters node API → fetch_drafters_adp.py → Supabase adp_sources table (dail
 DraftKings CSV (manual download) → load_draftkings_adp.py → Supabase adp_sources table (manual snapshots, source="draftkings")
 Chrome Profile 2 cookies → setup_dk_session.py → data/dk_session.json → fetch_draftkings_adp.py (Playwright) → Supabase adp_sources table (daily snapshots, source="draftkings")
 
+Underdog post-draft endpoint → fetch_underdog_postdraft_adp.py → Supabase adp_sources (source="underdog_postdraft", new players.underdog_postdraft_id column for ID matching)
+Drafters node API (same URL, new abbreviated field shape) → fetch_drafters_postdraft_adp.py → Supabase adp_sources (source="drafters_postdraft")
+DraftKings draftgroup 146136 → fetch_draftkings_postdraft_adp.py → Supabase adp_sources (source="draftkings_postdraft")
+
 Dynasty values CSV → match_dan_ids.py → Supabase players (dan_id) + dynasty_values (bootstrap)
 Google Sheet → Apps Script (dynasty_values_sync.js) → Supabase dynasty_values (ongoing sync)
 Change Log Sheet → Apps Script (dynasty_value_history_sync.js) → Supabase dynasty_value_history (ongoing sync)
@@ -319,6 +326,7 @@ Player writeups YAML → push_writeups.py → Supabase player_notes (upsert, ser
 Sleeper scrape SQLite (~/dev/sleeper-scrape/sleeper.db)
     → scripts/sleeper/upload_leagues.py → Supabase sleeper_leagues (upsert, 12,629 rows)
     → scripts/sleeper/upload_trades.py → Supabase sleeper_trades + sleeper_trade_assets (15,509 + 66,927 rows)
+    → ~/dev/sleeper-scrape/scrape_drafts.py → Supabase sleeper_drafts + sleeper_draft_picks (3,232 + 393,232 rows; in-progress drafts get partial snapshots refreshed each run)
 ```
 
 ### Daily Automation (launchd)
@@ -327,9 +335,12 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 
 | Job | Plist | Schedule | Script |
 |-----|-------|----------|--------|
-| Underdog ADP | `~/Library/LaunchAgents/com.nfldb.daily-adp.plist` | 8:00 AM | inline Python → `fetch_underdog_adp.py` |
-| Drafters ADP | `~/Library/LaunchAgents/com.nfldb.daily-drafters-adp.plist` | 8:05 AM | inline Python → `fetch_drafters_adp.py` |
-| DraftKings ADP | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-adp.plist` | 8:10 AM | inline Python → `fetch_draftkings_adp.py` |
+| Underdog ADP (pre-draft, Feb 19–Apr 22) | `~/Library/LaunchAgents/com.nfldb.daily-adp.plist` | 8:00 AM | inline Python → `fetch_underdog_adp.py` |
+| Drafters ADP (pre-draft, Feb 19–Apr 22) | `~/Library/LaunchAgents/com.nfldb.daily-drafters-adp.plist` | 8:05 AM | inline Python → `fetch_drafters_adp.py` |
+| DraftKings ADP (pre-draft, Feb 19–Apr 22) | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-adp.plist` | 8:10 AM | inline Python → `fetch_draftkings_adp.py` |
+| Underdog ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-underdog-postdraft-adp.plist` | 8:20 AM | inline Python → `fetch_underdog_postdraft_adp.py` |
+| Drafters ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-drafters-postdraft-adp.plist` | 8:25 AM | inline Python → `fetch_drafters_postdraft_adp.py` |
+| DraftKings ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-postdraft-adp.plist` | 8:30 AM | inline Python → `fetch_draftkings_postdraft_adp.py` |
 | Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | inline Python → `refresh_player_teams.py` |
 
 Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
@@ -384,7 +395,8 @@ To manage:
 | `footballguys_id` | text | FBG abbreviated name+year code |
 | `fanduel_id` | text | FanDuel player ID (from SportsData.io) |
 | `draftkings_id` | text | DraftKings player ID (from SportsData.io or CSV) |
-| `underdog_id` | text | Underdog Fantasy UUID |
+| `underdog_id` | text | Underdog Fantasy UUID (pre-draft contests) |
+| `underdog_postdraft_id` | text | Underdog Fantasy UUID (post-draft contests, distinct from `underdog_id`) |
 | `drafters_id` | text | Drafters platform ID |
 | `dan_id` | text | Personal custom ID (unique partial index, used for dynasty values sync) |
 | `height` | text | e.g. "6-2" (from FBG) |
@@ -864,6 +876,49 @@ Individual assets (players and draft picks) within each trade. Multiple rows per
 
 66,927 rows: 26,682 player assets + 40,245 pick assets. Join players via `sleeper_player_id = players.sleeper_id`.
 
+#### `sleeper_drafts`
+Dynasty drafts scraped from Sleeper. Both startup (10–40 rounds) and rookie (2–8 rounds), snake/linear only (no auctions). Captures both `complete` and `drafting` (in-progress) status — in-progress drafts get partial pick snapshots that refresh on each scrape.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `draft_id` | text PK | Sleeper draft ID |
+| `league_id` | text | FK → sleeper_leagues |
+| `season` | int | Season year (2026) |
+| `status` | text | 'complete' or 'drafting' |
+| `draft_format` | text | 'snake' or 'linear' (auctions filtered out) |
+| `draft_type` | text | 'startup' (rounds≥10) or 'rookie' (rounds<10 + has previous_league_id) |
+| `rounds` | int | Round count |
+| `teams` | int | Number of teams (8–16, others filtered out) |
+| `start_time` | bigint | Unix ms |
+| `last_picked` | bigint | Unix ms — most recent pick time |
+| `total_picks` | int | Pick count (partial for in-progress) |
+
+#### `sleeper_draft_picks`
+Individual picks within each draft. Multiple rows per draft.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `draft_id` | text | FK → sleeper_drafts, part of PK |
+| `league_id` | text | FK → sleeper_leagues |
+| `pick_no` | int | Overall pick number, part of PK |
+| `round` | int | |
+| `draft_slot` | int | Roster slot position (1-N) |
+| `roster_id` | int | Roster that made the pick |
+| `player_id` | text | Sleeper player ID (numeric, e.g. '11646'). Join via `players.sleeper_id`. |
+| `picked_by` | text | Sleeper user ID who made the pick (may differ from roster owner if proxy) |
+| `is_keeper` | int | 0 or 1 (keepers get `amount` set in some leagues) |
+| `player_name` | text | Cached at pick time |
+| `position` | text | QB/RB/WR/TE/K/DEF |
+| `team` | text | Sleeper team abbr at time of pick |
+| `amount` | int | Auction $ (NULL for non-auction); also FAAB amount for keeper drafts |
+
+**Filterable ADP query pattern** — join `sleeper_draft_picks → sleeper_drafts → sleeper_leagues` and filter on league fields (`is_superflex`, `ppr_type`, `total_rosters`, `te_premium`, `pass_td_pts`, `is_idp`, etc.). Example: top 12-team superflex full-PPR rookie ADP returns ~1,300 drafts and ~hundreds of rookies with thousands of appearances each.
+
+**Source pipeline**: `~/dev/sleeper-scrape/scrape_drafts.py` (Python, async via httpx) writes to local SQLite then pushes to Supabase via `supabase_push.push_drafts()`. Modes:
+- `--refresh` (daily): re-checks tracked drafts + samples 10K users for new leagues, ~15-20m
+- `--rescan` (one-off): iterates EVERY known league (ignoring `already_scraped`), captures new drafts in pre-existing leagues + refreshes in-progress pick snapshots, ~110m for 15K leagues
+- Default: discovery + scrape new leagues only
+
 #### `news_items`
 News and intel items for the FF Intel System. Pipeline: draft → approved → published. Anon can only read published items.
 
@@ -925,6 +980,7 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 | `idx_adp_player_id` | adp | (player_id) |
 | `idx_adp_sources_date` | adp_sources | (date DESC) |
 | `idx_adp_sources_source_year_date` | adp_sources | (source, year, date DESC) |
+| `idx_players_underdog_postdraft_id` | players | (underdog_postdraft_id) |
 | `idx_players_dan_id` | players | (dan_id) WHERE dan_id IS NOT NULL (unique partial) |
 | `idx_dynasty_values_updated` | dynasty_values | (updated_at) |
 | `idx_player_projections_source_year` | player_projections | (source, year) |
@@ -1027,6 +1083,8 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `sleeper_leagues` | 12,629 (2026 dynasty leagues) |
 | `sleeper_trades` | 15,509 (from 3,972 leagues, Dec 2025 – Mar 2026) |
 | `sleeper_trade_assets` | 66,927 (26,682 players + 40,245 picks) |
+| `sleeper_drafts` | 3,232 (1,705 complete + 1,527 in-progress; 2,142 rookie + 1,090 startup) |
+| `sleeper_draft_picks` | 393,232 |
 | `news_items` | 0 (new, empty) |
 
 ### Player ID Coverage (1,758 players)
@@ -1062,9 +1120,16 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 
 | Source | Year | Dates Tracked | Latest Row Count |
 |--------|------|---------------|-----------------|
-| `underdog` | 2026 | daily since Feb 16 | ~2,000+ (growing daily) |
-| `drafters` | 2026 | daily since Feb 26 | growing daily. ADP in round.pick float format (e.g. 1.089). JWT auth — update `DRAFTERS_JWT` in `.env` when 401 appears in log. |
-| `draftkings` | 2026 | daily since Feb 27 | ~312/snapshot, 0 unmatched. ADP in overall pick float format. Fully automated via Playwright: `setup_dk_session.py` (one-time per ~2 weeks, reads Chrome Profile 2 cookies) → `fetch_draftkings_adp.py` (daily, Playwright Chromium loads DK page to get fresh `jwe`, then hits API). Re-run setup when 401 appears in `draftkings_adp.log`. |
+| `underdog` | 2026 | daily Feb 16 – Apr 22 | pre-draft contest type (closed). |
+| `drafters` | 2026 | daily Feb 26 – Apr 22 | pre-draft. ADP in round.pick float format (e.g. 1.089). JWT auth — update `DRAFTERS_JWT` in `.env` when 401 appears in log. **Note**: Drafters changed their JSON field shape post-Apr 22 (`first_name`→`fn` etc.), so the old script silently broke; not relevant since pre-draft window is closed. |
+| `draftkings` | 2026 | daily Feb 27 – Apr 22 | pre-draft. ADP in overall pick float format. Fully automated via Playwright. Re-run `setup_dk_session.py` when 401 appears in `draftkings_adp.log` (~every 2 weeks). |
+| `underdog_postdraft` | 2026 | daily since Apr 29 | post-draft contest type. ~386 rows/snapshot. Matches by new `players.underdog_postdraft_id` column (first-run backfill via name+pos). |
+| `drafters_postdraft` | 2026 | daily since Apr 29 | post-draft. Same `formatId=0` URL as pre-draft, but uses new abbreviated field shape (`fn`, `ln`, `pn`, `tn`, `mod_adp`). ~288 rows/snapshot. |
+| `draftkings_postdraft` | 2026 | daily since Apr 29 | post-draft draftgroup `146136`. ~334 rows/snapshot. Reuses existing `data/dk_session.json`. |
+| `sleeper_sf` | 2026 | daily (when launchd fires) | startup, superflex consensus from Sleeper drafts. Computed by `~/dev/sleeper-scrape/compute_adp.py`. ~565 players/snapshot. Filters: `ppr_type='full'`, `te_premium ≤ 0.5`. Pick numbers normalized to 12-team. MIN_APPEARANCES=3. |
+| `sleeper_1qb` | 2026 | daily (when launchd fires) | startup, 1QB consensus. ~413 players/snapshot. |
+| `sleeper_sf_rookie` | 2026 | daily since Apr 29 | rookie, superflex. Filtered to `players.draft_year = 2026` only (excludes vets that appear in some leagues' rookie drafts). ~74 players/snapshot. |
+| `sleeper_1qb_rookie` | 2026 | daily since Apr 29 | rookie, 1QB. 2026 rookies only. ~57 players/snapshot. |
 
 ## Supabase Storage
 
@@ -1164,6 +1229,26 @@ When a high-value prospect emerges mid-season (combine, pro days, pre-draft hype
 **Examples added**:
 - Feb 27, 2026 (combine): Brenen Thompson (dan_id=2026072, WR), Jeff Caldwell (dan_id=2026073, WR), Deion Burks (dan_id=2026074, WR).
 - Mar 4, 2026 (pre-draft): Taylen Green (2026075, QB), Cole Payton (2026076, QB), Behren Morton (2026077, QB), Drew Allar (2026078, QB), Cade Klubnik (2026079, QB), Carson Beck (2026080, QB — already in DB, dan_id patched), Jamarion Miller (2026081, RB — "Jam Miller" on Sleeper/DK/Underdog), Robert Henry Jr. (2026082, RB — no Sleeper or Underdog ID).
+- Apr 26, 2026 (post-2026 NFL Draft, late rounds / deep-dynasty): 26 rookies with dan_ids 2026300–2026325 added via `scripts/ids/add_2026_late_round_rookies.py`. 25 of 26 were already in DB from prior Sleeper player_db ingest (only `dan_id` + `latest_team` needed patching); only Marlin Klein (TE, HOU) was a fresh insert. All have sleeper_id + sportradar player_id. **Gotcha**: User's Sheet had 2025XXX dan_id prefix by mistake — corrected to 2026XXX in the script. Always sanity-check that the dan_id year matches the draft class.
+
+### Rookie player_id → sportradar_id Migration (`migrate_rookie_player_ids.py`)
+
+Rookies added pre-NFL-Draft typically have `player_id` set to their Underdog UUID (or a generated UUID). Once Sleeper exposes a `sportradar_id` for them post-draft, we migrate `player_id` to that canonical value so joins to NFFC / Sportradar feeds work cleanly.
+
+**Apr 26, 2026 run**: Migrated 62 of 70 mismatched 2026 rookies (Jeremiyah Love, Carnell Tate, Drew Allar, etc.) from Underdog/generated UUIDs → Sleeper sportradar_id. 8 unfixable (6 not in Sleeper at all, 2 with no sportradar_id in Sleeper) — all UDFA / irrelevant. Result: 100 of 108 2026 rookies now keyed on canonical sportradar UUID (was 38). Audit trail: `data/migrations/player_id_remap_2026_04_26.json`.
+
+**Per-player flow** (transactional via pg8000):
+1. `UPDATE players SET dan_id = NULL WHERE player_id = old_pid` — frees the unique partial index on `dan_id` so step 2 doesn't violate
+2. `INSERT INTO players (...) VALUES (...)` — full row copy with new `player_id = sportradar_id`
+3. `UPDATE` FK refs across 10 tables (`dynasty_values`, `dynasty_value_history`, `player_projections`, `adp_sources`, `player_notes`, `news_items`, `adp`, `draft_picks`, `player_seasons`, `player_stats`)
+4. `DELETE FROM players WHERE player_id = old_pid`
+5. ROLLBACK on any error inside the txn
+
+**External-to-Supabase steps** the script also handles:
+- Replace `player_id:` in vault YAML frontmatter at `~/obsidian-vault/Fantasy Football/Players/*.md`
+- Replace player_id strings in `data/writeups/player_writeups.yaml` (otherwise next `push_writeups.py` would FK-fail)
+
+**Re-run pattern**: Safe to re-run as Sleeper assigns sportradar IDs to the remaining 8 rookies. Script no-ops on already-canonical players.
 
 ## Key Gotchas
 

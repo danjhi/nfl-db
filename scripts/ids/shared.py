@@ -119,6 +119,7 @@ TEAM_FULLNAME_TO_ABBR = {
 # Used by build_player_lookup to index players under both names.
 PLAYER_ALIASES = {
     "hollywood brown": "marquise brown",
+    "marquise brown": "hollywood brown",
     "chig okonkwo": "chigoziem okonkwo",
     "chigoziem okonkwo": "chig okonkwo",
     "gabe davis": "gabriel davis",

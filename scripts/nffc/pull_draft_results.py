@@ -1,12 +1,23 @@
 """
-Pull draft results for all NFFC leagues across all years (2018-2025).
+Pull draft results for all NFFC leagues across all tracked years.
 Saves results as one JSON file per year in data/raw/drafts/.
 
-Usage: python3 scripts/pull_draft_results.py
+Year range is driven by NFFC_YEAR_CURRENT (defaults to 2026). Anything
+before the current year uses the historical endpoint; the current year
+uses the public / live endpoint.
+
+Usage:
+    NFFC_API_KEY=<key> python3 scripts/pull_draft_results.py
+
+Env vars:
+    NFFC_API_KEY          required — NFFC API key
+    NFFC_YEAR_CURRENT     optional — defaults to 2026
+    NFFC_YEAR_START       optional — defaults to 2018 (earliest tracked year)
 """
 
 import json
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -14,14 +25,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Config
-API_KEY = os.environ.get("NFFC_API_KEY", "22c3eaf3f16842fda979d38c83880386")
+API_KEY = os.environ.get("NFFC_API_KEY")
+if not API_KEY:
+    sys.exit("Error: NFFC_API_KEY env var is required.")
+
 BASE_URL = "https://nfc.shgn.com/api/public"
 DATA_DIR = Path(__file__).parent.parent / "data" / "raw"
 DRAFTS_DIR = DATA_DIR / "drafts"
 LEAGUES_DIR = DATA_DIR / "league_details"
 MAX_WORKERS = 5  # concurrent requests — be polite to the API
-YEARS_HISTORICAL = range(2018, 2025)  # 2018-2024 use historical endpoints
-YEAR_CURRENT = 2025
+
+YEAR_CURRENT = int(os.environ.get("NFFC_YEAR_CURRENT", "2026"))
+YEAR_START = int(os.environ.get("NFFC_YEAR_START", "2018"))
+YEARS_HISTORICAL = range(YEAR_START, YEAR_CURRENT)  # years before current
 
 
 HEADERS = {"User-Agent": "NFFC-Draft-Explorer/1.0"}

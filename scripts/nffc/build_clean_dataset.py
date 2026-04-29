@@ -1,6 +1,10 @@
 """
-Build clean Rotowire OC dataset from raw NFFC API data + nflreadr enrichment.
+Build clean Online-Championship dataset from raw NFFC API data + nflreadr enrichment.
 Outputs tidy CSV files ready for Supabase upload.
+
+Covers both branding eras of the same contest:
+- 2018–2025: "Rotowire Online Championship"
+- 2026+:     "Footballguys Online Championship"
 
 Usage: python3 scripts/build_clean_dataset.py
 """
@@ -14,12 +18,22 @@ NFLREADR_DIR = Path(__file__).parent.parent / "data" / "nflreadr"
 OUT_DIR = Path(__file__).parent.parent / "data" / "clean"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-YEARS = range(2018, 2026)
+YEARS = range(2018, 2027)
 
 
-def is_rotowire_oc(name):
-    name_lower = name.lower()
-    return "rotowire" in name_lower and "online" in name_lower
+def is_main_oc(name):
+    """Match the main NFFC Online Championship contest across the 2026 rebrand.
+
+    - 2018–2025: 'Rotowire Online Championship'
+    - 2026+:     'Footballguys Online Championship'
+    Both are the same product — same structure, same entry fee, same rules.
+    """
+    n = (name or "").lower()
+    return "online championship" in n and ("rotowire" in n or "footballguys" in n)
+
+
+# Backwards-compatibility alias — remove after no callers remain
+is_rotowire_oc = is_main_oc
 
 
 def load_nflreadr_players():

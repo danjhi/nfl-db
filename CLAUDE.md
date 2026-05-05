@@ -121,8 +121,9 @@ Scripts are organized by data source.
 | `run_daily_drafters_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `load_draftkings_adp.py` | Load DraftKings ADP from manually downloaded CSV → upsert into adp_sources. Auto-finds latest `DkPreDraftRankings*.csv` in ~/Downloads. ADP in overall pick float format. |
 | `setup_dk_session.py` | One-time setup: extract DK cookies from Chrome Profile 2 via `browser_cookie3` → save to `data/dk_session.json`. Re-run when daily fetch returns auth errors (~2 weeks). Chrome must be logged in to DK in Profile 2. |
+| `setup_underdog_session.py` | One-time setup: extract Underdog cookies (both `underdogfantasy.com` and `underdogsports.com`) from Chrome Profile 2 → save to `data/underdog_session.json`. Re-run when daily fetch returns Cloudflare 403 (~every 2 weeks). Required after Underdog domain migration + Cloudflare bot management (May 2026). |
 | `fetch_draftkings_adp.py` | Daily automated DK ADP fetch → upsert into adp_sources. Uses Playwright Chromium with saved session (loads a DK page to trigger fresh `jwe`, then hits API). Requires `data/dk_session.json` from setup script. |
-| `fetch_underdog_postdraft_adp.py` | **Post-draft** Underdog ADP fetch → upsert into adp_sources (`source="underdog_postdraft"`). Different CSV URL (3 distinct UUIDs vs pre-draft). Matches by `underdog_postdraft_id` first, falls back to name+pos and writes back to `players.underdog_postdraft_id` (first-run backfill). |
+| `fetch_underdog_postdraft_adp.py` | **Post-draft** Underdog ADP fetch → upsert into adp_sources (`source="underdog_postdraft"`). Different CSV URL (3 distinct UUIDs vs pre-draft, on `app.underdogsports.com` after May 2026 domain migration). Matches by `underdog_postdraft_id` first, falls back to name+pos and writes back to `players.underdog_postdraft_id` (first-run backfill). **Uses Playwright + saved session** (`data/underdog_session.json`) — Cloudflare bot management blocks plain HTTP. Stealth args: `--disable-blink-features=AutomationControlled` + override `navigator.webdriver` + Chrome 130 UA. |
 | `fetch_drafters_postdraft_adp.py` | **Post-draft** Drafters ADP fetch → upsert into adp_sources (`source="drafters_postdraft"`). Same `formatId=0` URL as pre-draft, but Drafters changed JSON field shape post-draft (`first_name`→`fn`, `last_name`→`ln`, `position`→`pn`, `nfl_team`→`tn`). New script handles new shape. |
 | `fetch_draftkings_postdraft_adp.py` | **Post-draft** DK ADP fetch → upsert into adp_sources (`source="draftkings_postdraft"`). Different draftgroup ID (`146136` vs `141336` pre-draft). Reuses existing `data/dk_session.json` (same DK login). |
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
@@ -139,6 +140,12 @@ Scripts are organized by data source.
 | Script | Purpose |
 |--------|---------|
 | `push_writeups.py` | Read `data/writeups/player_writeups.yaml`, filter non-empty writeups, upsert into `player_notes` via REST API. Supports `--dry-run` |
+
+### Health (`scripts/health/`)
+
+| Script | Purpose |
+|--------|---------|
+| `daily_scrape_health.py` | Daily check at noon (via launchd `com.nfldb.daily-health-check`). For each ADP source, queries today's row count vs floor + scans related log files for auth/traceback patterns. Sends macOS notification (osascript) on any failure. Writes daily report to `data/logs/health_<date>.txt`. Use `--force` to send a notification even on success (testing). |
 
 ### Enrichment (`scripts/ids/`)
 
@@ -299,7 +306,7 @@ Drafters node API → fetch_drafters_adp.py → Supabase adp_sources table (dail
 DraftKings CSV (manual download) → load_draftkings_adp.py → Supabase adp_sources table (manual snapshots, source="draftkings")
 Chrome Profile 2 cookies → setup_dk_session.py → data/dk_session.json → fetch_draftkings_adp.py (Playwright) → Supabase adp_sources table (daily snapshots, source="draftkings")
 
-Underdog post-draft endpoint → fetch_underdog_postdraft_adp.py → Supabase adp_sources (source="underdog_postdraft", new players.underdog_postdraft_id column for ID matching)
+Chrome Profile 2 cookies → setup_underdog_session.py → data/underdog_session.json → fetch_underdog_postdraft_adp.py (Playwright + Cloudflare-passing stealth args) → Supabase adp_sources (source="underdog_postdraft", new players.underdog_postdraft_id column for ID matching)
 Drafters node API (same URL, new abbreviated field shape) → fetch_drafters_postdraft_adp.py → Supabase adp_sources (source="drafters_postdraft")
 DraftKings draftgroup 146136 → fetch_draftkings_postdraft_adp.py → Supabase adp_sources (source="draftkings_postdraft")
 
@@ -342,6 +349,8 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | Drafters ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-drafters-postdraft-adp.plist` | 8:25 AM | inline Python → `fetch_drafters_postdraft_adp.py` |
 | DraftKings ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-postdraft-adp.plist` | 8:30 AM | inline Python → `fetch_draftkings_postdraft_adp.py` |
 | Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | inline Python → `refresh_player_teams.py` |
+| Sleeper trio (trades + drafts + compute_adp) | `~/Library/LaunchAgents/com.sleeper.daily-scrape.plist` | 8:45 AM | inline Python → `scrape_trades.py --active-only` (7-day window, ~50 min) → `scrape_drafts.py --refresh` (~15 min) → `compute_adp.py` (<1 min). Lives in `~/dev/sleeper-scrape/`. Was 2 PM until May 2026 — moved to 8:45 AM after launchd missed firings. Run `--refresh` (full 15K leagues) manually weekly to catch leagues outside the active window. |
+| Health check | `~/Library/LaunchAgents/com.nfldb.daily-health-check.plist` | 12:00 PM | inline Python → `scripts/health/daily_scrape_health.py`. Queries today's `adp_sources` row counts vs floors per source, greps logs for 401/403/Traceback/ERROR/Unauthorized, fires macOS notification on failure. Always writes `data/logs/health_<date>.txt`. |
 
 Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
 
@@ -1123,7 +1132,7 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `underdog` | 2026 | daily Feb 16 – Apr 22 | pre-draft contest type (closed). |
 | `drafters` | 2026 | daily Feb 26 – Apr 22 | pre-draft. ADP in round.pick float format (e.g. 1.089). JWT auth — update `DRAFTERS_JWT` in `.env` when 401 appears in log. **Note**: Drafters changed their JSON field shape post-Apr 22 (`first_name`→`fn` etc.), so the old script silently broke; not relevant since pre-draft window is closed. |
 | `draftkings` | 2026 | daily Feb 27 – Apr 22 | pre-draft. ADP in overall pick float format. Fully automated via Playwright. Re-run `setup_dk_session.py` when 401 appears in `draftkings_adp.log` (~every 2 weeks). |
-| `underdog_postdraft` | 2026 | daily since Apr 29 | post-draft contest type. ~386 rows/snapshot. Matches by new `players.underdog_postdraft_id` column (first-run backfill via name+pos). |
+| `underdog_postdraft` | 2026 | daily since Apr 29 | post-draft contest type. ~386 rows/snapshot. Matches by new `players.underdog_postdraft_id` column (first-run backfill via name+pos). **As of May 5, 2026**: Underdog migrated to `app.underdogsports.com` and added Cloudflare bot management — fetcher rewritten to use Playwright + saved session (`data/underdog_session.json`) like DK. Re-run `setup_underdog_session.py` when 403 returns. |
 | `drafters_postdraft` | 2026 | daily since Apr 29 | post-draft. Same `formatId=0` URL as pre-draft, but uses new abbreviated field shape (`fn`, `ln`, `pn`, `tn`, `mod_adp`). ~288 rows/snapshot. |
 | `draftkings_postdraft` | 2026 | daily since Apr 29 | post-draft draftgroup `146136`. ~334 rows/snapshot. Reuses existing `data/dk_session.json`. |
 | `sleeper_sf` | 2026 | daily (when launchd fires) | startup, superflex consensus from Sleeper drafts. Computed by `~/dev/sleeper-scrape/compute_adp.py`. ~565 players/snapshot. Filters: `ppr_type='full'`, `te_premium ≤ 0.5`. Pick numbers normalized to 12-team. MIN_APPEARANCES=3. |

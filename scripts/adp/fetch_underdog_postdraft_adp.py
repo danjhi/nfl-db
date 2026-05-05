@@ -3,13 +3,16 @@
 Mirrors fetch_underdog_adp.py but for the post-draft best ball contest type
 that opened after the 2026 NFL Draft. Differences from pre-draft:
   - SOURCE = "underdog_postdraft" (separate adp_sources rows)
-  - Different CSV URL (3 different UUIDs in the path)
+  - Different CSV URL (3 different UUIDs in the path; domain migrated from
+    underdogfantasy.com → underdogsports.com in May 2026)
   - Matches by `underdog_postdraft_id` first, falls back to name+pos
   - On name-fallback match, writes the new underdog id back to
     `players.underdog_postdraft_id` so future runs match by ID
 
-The post-draft contest issues fresh Underdog UUIDs distinct from pre-draft,
-so a separate column is required.
+Cloudflare bot management blocks plain urllib + curl on the Underdog endpoint
+as of May 2026. We use Playwright Chromium with a saved session file
+(data/underdog_session.json) populated by setup_underdog_session.py — same
+pattern as DraftKings. Re-run setup when 403 errors return (~every 2 weeks).
 
 Usage:
     python3 scripts/adp/fetch_underdog_postdraft_adp.py [--dry-run]
@@ -40,7 +43,7 @@ SOURCE = "underdog_postdraft"
 TODAY = datetime.date.today().isoformat()
 
 UNDERDOG_CSV_URL = (
-    "https://app.underdogfantasy.com/rankings/download/"
+    "https://app.underdogsports.com/rankings/download/"
     "a9c04e81-1ace-4b16-a31d-4c725a47f16f/"
     "ccf300b0-9197-5951-bd96-cba84ad71e86/"
     "9e62863e-1b29-53e8-8aca-2aae06aaac5f"
@@ -49,13 +52,68 @@ UNDERDOG_CSV_URL = (
     "&state_config_id=7b937c4c-58ae-467c-90e7-c8dc2202a02a"
 )
 
+SESSION_FILE = os.path.normpath(os.path.join(_script_dir, "..", "..", "data", "underdog_session.json"))
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
 SLOT_TO_POS = {"QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE", "K": "K", "FLEX": None}
 
 
 def fetch_underdog_csv():
-    req = urllib.request.Request(UNDERDOG_CSV_URL, headers={"User-Agent": "Mozilla/5.0"})
-    resp = urllib.request.urlopen(req)
-    text = resp.read().decode("utf-8")
+    """Use saved session + Playwright Chromium to download the Underdog CSV.
+
+    The Underdog CSV endpoint is behind Cloudflare bot management as of
+    May 2026 — plain urllib gets 403. Playwright with valid cookies +
+    stealth args passes the check.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("ERROR: playwright not installed.")
+        print("  Run: pip install playwright && python3 -m playwright install chromium")
+        sys.exit(1)
+
+    if not os.path.exists(SESSION_FILE):
+        print("ERROR: No saved Underdog session found.")
+        print(f"  Expected: {SESSION_FILE}")
+        print("  Run setup first:")
+        print("    python3 scripts/adp/setup_underdog_session.py --test")
+        sys.exit(1)
+
+    print(f"  Loading session from {os.path.basename(SESSION_FILE)}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        ctx = browser.new_context(
+            storage_state=SESSION_FILE,
+            accept_downloads=True,
+            user_agent=USER_AGENT,
+        )
+        page = ctx.new_page()
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        text = None
+        try:
+            with page.expect_download(timeout=30000) as dl_info:
+                try:
+                    page.goto(UNDERDOG_CSV_URL, timeout=30000)
+                except Exception:
+                    pass  # 'Download is starting' is the expected exception
+            dl = dl_info.value
+            path = dl.path()
+            with open(path) as f:
+                text = f.read()
+        except Exception as e:
+            print(f"ERROR: download failed: {type(e).__name__}: {str(e)[:200]}")
+            print("  Likely Cloudflare 403 — re-run setup_underdog_session.py")
+            ctx.close()
+            browser.close()
+            sys.exit(1)
+
+        ctx.close()
+        browser.close()
+
     return list(csv.DictReader(io.StringIO(text)))
 
 

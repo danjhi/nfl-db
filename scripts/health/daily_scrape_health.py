@@ -103,23 +103,50 @@ def count_rows_today(source):
 
 
 def scan_log_for_errors(log_path, since_hours=24):
-    """Return list of error lines from `log_path` matching ERROR_PATTERNS,
-    written in the last `since_hours`. Caps at 5 lines per file."""
+    """Return list of error lines from today's portion of `log_path`.
+
+    Logs are append-only across days. To avoid surfacing stale errors from
+    prior runs, only consider lines written after the most recent line that
+    contains today's date string (`YYYY-MM-DD`). If no such line exists,
+    today's run hasn't logged anything → return empty.
+
+    Caps at 5 lines.
+    """
     if not os.path.exists(log_path):
         return []
     cutoff_mtime = datetime.datetime.now().timestamp() - since_hours * 3600
     if os.path.getmtime(log_path) < cutoff_mtime:
-        return []  # log not touched recently — ignore (probably a stale file)
-    hits = []
+        return []  # file wasn't touched recently
     try:
         with open(log_path, errors="replace") as f:
-            for line in f:
-                if any(p.search(line) for p in ERROR_PATTERNS):
-                    hits.append(line.rstrip())
-                    if len(hits) >= 5:
-                        break
+            lines = f.readlines()
     except Exception:
-        pass
+        return []
+
+    # Find the index of the LAST line containing today's date string —
+    # that's where today's run output begins.
+    today_str = TODAY  # e.g. "2026-05-07"
+    today_start_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if today_str in lines[i]:
+            today_start_idx = i
+            # Walk back to the most recent "Starting" line for the run header
+            for j in range(i, max(-1, i - 50), -1):
+                if today_str in lines[j]:
+                    today_start_idx = j
+                else:
+                    break
+            break
+
+    if today_start_idx is None:
+        return []  # log has no content for today
+
+    hits = []
+    for line in lines[today_start_idx:]:
+        if any(p.search(line) for p in ERROR_PATTERNS):
+            hits.append(line.rstrip())
+            if len(hits) >= 5:
+                break
     return hits
 
 

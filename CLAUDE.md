@@ -41,6 +41,7 @@ The vault is the historical record and design rationale. CLAUDE.md is operationa
 | **SportsData.io** | `https://api.sportsdata.io/v3/nfl/` | Header `Ocp-Apim-Subscription-Key` | `SPORTSDATA_API_KEY` |
 | **Footballguys** | `https://www.footballguys.com/api/` | Query param `apikey` | `FBG_API_KEY` |
 | **Sleeper** | `https://api.sleeper.app/v1/` | None required | N/A |
+| **The Odds API** | `https://api.the-odds-api.com/v4/` | Query param `apiKey` | `ODDS_API_KEY` |
 
 ### SportsData.io Endpoints Used
 - `scores/json/Players` — Full player list with PlayerID, FanDuelPlayerID, DraftKingsPlayerID, bios, photos
@@ -51,6 +52,13 @@ The vault is the historical record and design rationale. CLAUDE.md is operationa
 
 ### Sleeper Endpoints Used
 - `players/nfl` — Full NFL player database (~5MB, call sparingly). Returns player_id (sleeper_id), sportradar_id, espn_id, yahoo_id, fantasy_data_id, stats_id, rotowire_id, rotoworld_id, team, position, height, weight, age, college, depth_chart info
+- `schedule/nfl/regular/{year}` — Full regular season schedule (272 games). Fields: status, date, home, week, game_id (Sleeper's), away. Free, no auth. Caveat: Sleeper occasionally retains `status=canceled` rows for moved games (filter those out)
+- `schedule/nfl/post/{year}` — Postseason schedule (empty until bracket fills)
+
+### The Odds API Endpoints Used
+
+- `sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american` — Live US sportsbook lines for upcoming NFL games. Costs 3 credits per call (1 base × 3 markets × 1 region). Currently on 20K/mo tier. Bookmakers returned (~10): betmgm, betonlineag, betrivers, betus, bovada, draftkings, fanatics, fanduel, lowvig, williamhill_us
+- `historical/sports/americanfootball_nfl/odds?date={iso8601}` — Historical snapshots (10× cost). Used by ff-sim for line-age calibration, not by this repo
 
 ### FBG Endpoints Used
 - `projections/weekly?year={year}&week={week}` — Weekly stat projections keyed by FBG player ID
@@ -128,6 +136,24 @@ Scripts are organized by data source.
 | `fetch_draftkings_postdraft_adp.py` | **Post-draft** DK ADP fetch → upsert into adp_sources (`source="draftkings_postdraft"`). Different draftgroup ID (`146136` vs `141336` pre-draft). Reuses existing `data/dk_session.json` (same DK login). |
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
+
+### Games / Schedule (`scripts/games/`)
+
+| Script | Purpose |
+|--------|---------|
+| `schema.sql` | DDL for `games` + `game_odds_snapshots` (with FK→teams, FK→games, RLS, indexes). Apply via Supabase SQL Editor or `psql` |
+| `fetch_sleeper_schedule.py` | Daily Sleeper schedule fetch (regular + post). Filters `status=canceled` rows, normalizes LAR→LA, derives `game_id` as `{season}_{week:02d}_{AWAY}_{HOME}`, upserts to `games`. Supports `--year`, `--dry-run` |
+| `export_schedule_nflreadr.R` | Export `nflreadr::load_schedules(year)` → `data/nflreadr/schedule_{year}.csv` with stadium/roof/surface/kickoff/lines (one-time per release; rerun when nflverse updates) |
+| `enrich_schedule_nflreadr.py` | Read R-exported CSV (cp1252 encoded — Levi's® Stadium), match by (season, week, home, away), PATCH metadata (kickoff UTC, stadium, roof, surface, is_primetime, is_international, location_override) |
+
+### Odds (`scripts/odds/`)
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_odds_snapshot.py` | Daily live-line snapshot from The Odds API → upsert into `game_odds_snapshots` (~3 credits/run, ~10 books × ~75-272 games × 1 row). Matches Odds API events to `games.game_id` by (date_ET, home_abbr, away_abbr) via `TEAM_FULLNAME_TO_ABBR` in shared.py. Logs to `data/logs/odds_snapshot.log` + `.jsonl` |
+| `fetch_draftkings_lines.py` | Daily DK-only full-season scraper via Playwright. Drives a headless Chromium against `sportsbook.draftkings.com/leagues/football/nfl`, clicks the "View More" button (`.cms-market-selector-load-more-button`) to paginate, captures `sportscontent/controldata/.../markets` XHR responses. Extracts spread/total/moneyline from the `selections.points` + `displayOdds.american` fields. **Full 272-game coverage available here even when The Odds API only shows the next 5-6 weeks.** Bookmaker tag: `draftkings`. Requires Playwright + Chromium installed. Run with `SSL_CERT_FILE=$(python3 -m certifi)` if SSL fails. |
+| `capture_one_shot.py` | One-shot grab of NFL futures + player game-level props from The Odds API. Captures Super Bowl winner futures (~1 credit) and probes all listed events for player props (free when no props posted). Saves raw JSON to `data/imports/odds_api/`. Run sparingly — designed as one-time use during the 20K/mo tier window. After May 17 the 90/mo budget can't afford much beyond the daily game-line snapshot. |
+| `capture_draftkings_futures.py` | One-shot grab of DK's full NFL futures + season-long player props catalog via Playwright. Sweeps 17 URLs covering: Super Bowl / conference / division / playoff outrights, 6 awards (MVP/OPOY/DPOY/OROY/DROY/Comeback), 4 player season-long markets (passing/rushing/receiving yards + receiving TDs O/U), rookie outrights, and player matchup H2H. Saves raw JSON to `data/imports/odds_api/draftkings_futures/{YYYY-MM-DD}/{slug}.json`. **Zero API credits** — pure Playwright. Re-run dated subdir each invocation so daily re-runs are idempotent. No loaders yet — this is a parking-lot capture; build Supabase ingestion when actually needed. Notable gaps in DK's coverage: team season win totals (O/U) and most position-2/3 receiving TD lines (only Kelce as of 2026-05-15). |
 
 ### Projections (`scripts/projections/`)
 
@@ -328,6 +354,11 @@ Rookie headshot PNGs → upload_rookie_headshots.py → Supabase Storage (headsh
 
 Sleeper API → refresh_player_teams.py → Supabase players.latest_team (daily, via launchd)
 
+Sleeper schedule API → fetch_sleeper_schedule.py → Supabase games table (daily refresh, 272 reg + post when filled)
+nflreadr (R) → export_schedule_nflreadr.R → data/nflreadr/schedule_{year}.csv → enrich_schedule_nflreadr.py → Supabase games (PATCH stadium, roof, surface, kickoff UTC, is_primetime, is_international)
+The Odds API → fetch_odds_snapshot.py → Supabase game_odds_snapshots (daily snapshots, ~10 books × games-with-lines, ~3 credits/run)
+DraftKings sportsbook page (Playwright) → fetch_draftkings_lines.py → Supabase game_odds_snapshots (daily, 272 games, bookmaker='draftkings'). Use when Odds API lags vs DK direct.
+
 Player writeups YAML → push_writeups.py → Supabase player_notes (upsert, service role key)
 
 Sleeper scrape SQLite (~/dev/sleeper-scrape/sleeper.db)
@@ -349,10 +380,12 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | Drafters ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-drafters-postdraft-adp.plist` | 8:25 AM | inline Python → `fetch_drafters_postdraft_adp.py` |
 | DraftKings ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-postdraft-adp.plist` | 8:30 AM | inline Python → `fetch_draftkings_postdraft_adp.py` |
 | Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | inline Python → `refresh_player_teams.py` |
+| Schedule Refresh | `~/Library/LaunchAgents/com.nfldb.daily-schedule.plist` (TODO) | 8:35 AM (planned, May 15 – Feb 15) | inline Python → `fetch_sleeper_schedule.py` (captures flex moves + postseason bracket as it fills) |
+| Odds Snapshot | `~/Library/LaunchAgents/com.nfldb.daily-odds.plist` (TODO) | 8:40 AM (planned, Jul 1 – Feb 15) | inline Python → `fetch_odds_snapshot.py` (~3 credits/run on 20K/mo budget) |
 | Sleeper trio (trades + drafts + compute_adp) | `~/Library/LaunchAgents/com.sleeper.daily-scrape.plist` | 8:45 AM | inline Python → `scrape_trades.py --active-only` (7-day window, ~50 min) → `scrape_drafts.py --refresh` (~15 min) → `compute_adp.py` (<1 min). Lives in `~/dev/sleeper-scrape/`. Was 2 PM until May 2026 — moved to 8:45 AM after launchd missed firings. Run `--refresh` (full 15K leagues) manually weekly to catch leagues outside the active window. |
 | Health check | `~/Library/LaunchAgents/com.nfldb.daily-health-check.plist` | 12:00 PM | inline Python → `scripts/health/daily_scrape_health.py`. Queries today's `adp_sources` row counts vs floors per source, greps logs for 401/403/Traceback/ERROR/Unauthorized, fires macOS notification on failure. Always writes `data/logs/health_<date>.txt`. |
 
-Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`
+Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`, `data/logs/odds_snapshot.log`, `data/logs/odds_snapshot.jsonl`
 
 **Important**: All plists use `/usr/bin/python3 -c` with inline Python (pattern: `os.chdir(repo); exec(compile(open(script).read(), script, 'exec'))`). Do NOT use `/bin/bash` — bash under launchd cannot read files in `~/dev/` due to macOS security. The `com.apple.provenance` attribute on files created by VS Code/Claude is set by the OS and cannot be removed.
 
@@ -606,6 +639,49 @@ Default positional value shares that dynasty values are calibrated to. 1QB base:
 | `team_id` | text | nflreadr numeric team ID |
 
 No FK from `players.latest_team` — too rigid for FA/NULL/historical values.
+
+#### `games`
+
+One row per scheduled NFL game (regular + post). Loaded from Sleeper (`fetch_sleeper_schedule.py`), enriched from nflreadr (`enrich_schedule_nflreadr.py`). `game_id` follows nflreadr format `{season}_{week:02d}_{AWAY}_{HOME}` for clean joins with `team_game_stats`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `game_id` | text PK | e.g. `2026_01_CHI_CAR` (Bears @ Panthers Week 1 2026) |
+| `season` | integer | |
+| `week` | integer | 1–18 reg; postseason TBD |
+| `season_type` | text | CHECK ∈ {`reg`, `post`} |
+| `game_date` | date | Local game date |
+| `kickoff` | timestamptz | UTC (converted from nflreadr ET) |
+| `home_team` | text | FK → `teams.team_abbr` (LA not LAR) |
+| `away_team` | text | FK → `teams.team_abbr` |
+| `home_score` / `away_score` | int | NULL until played |
+| `stadium` | text | From nflreadr |
+| `roof` | text | `dome` / `outdoors` / `closed` / `open` |
+| `surface` | text | `grass` / `fieldturf` / `matrixturf` / ... |
+| `network` | text | Nullable (nflreadr doesn't expose; reserved for future) |
+| `is_primetime` | boolean | Heuristic: ET kickoff hour ∈ {19, 20, 21} |
+| `is_international` | boolean | From nflreadr `location == 'Neutral'` |
+| `location_override` | text | Stadium name for international games (e.g. "Melbourne Cricket Ground") |
+| `sleeper_game_id` | text | Sleeper's opaque ID (kept for debugging) |
+| `updated_at` | timestamptz | Default `now()` |
+
+#### `game_odds_snapshots`
+
+Daily betting line snapshots, one row per (game, bookmaker, date). Mirrors `adp_sources` pattern. Source: The Odds API live endpoint.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `game_id` | text | FK → `games`, part of PK |
+| `bookmaker` | text | part of PK. ~10 books seen: betmgm, betonlineag, betrivers, betus, bovada, draftkings, fanatics, fanduel, lowvig, williamhill_us |
+| `date` | date | Default `CURRENT_DATE`, part of PK |
+| `home_spread` | numeric | Standard convention: negative = home favored |
+| `home_spread_price` / `away_spread_price` | int | American odds |
+| `total` | numeric | Over/under |
+| `over_price` / `under_price` | int | American odds |
+| `home_moneyline` / `away_moneyline` | int | American odds |
+| `home_implied_total` / `away_implied_total` | numeric | Computed: `total/2 ∓ home_spread/2` |
+| `retrieved_at` | timestamptz | Default `now()` |
+| PK | | (game_id, bookmaker, date) |
 
 #### `team_game_stats`
 
@@ -1008,6 +1084,13 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 | `idx_news_items_player_id` | news_items | (player_id) |
 | `idx_news_items_status` | news_items | (status) |
 | `idx_news_items_approved_at` | news_items | (approved_at DESC) WHERE status IN ('approved', 'published') |
+| `idx_games_season_week` | games | (season, week) |
+| `idx_games_home_season` | games | (home_team, season) |
+| `idx_games_away_season` | games | (away_team, season) |
+| `idx_games_kickoff` | games | (kickoff) |
+| `idx_gos_date` | game_odds_snapshots | (date DESC) |
+| `idx_gos_game` | game_odds_snapshots | (game_id) |
+| `idx_gos_book_date` | game_odds_snapshots | (bookmaker, date DESC) |
 
 ### RLS
 
@@ -1051,6 +1134,7 @@ All tables: RLS enabled. Policies:
 28. `create_sleeper_trade_tables` — 3 Sleeper trade tables (sleeper_leagues, sleeper_trades, sleeper_trade_assets) + 4 indexes + RLS. Applied via pg8000.
 29. `create_news_items` — News/intel pipeline table with 3 indexes + RLS (anon SELECT published only, service role full access)
 30. `create_team_advanced_stats` — Season-level advanced team analytics (efficiency, red zone, scheme, PROE, pressure) with pre-computed league ranks + 2 indexes + RLS
+31. `create_games_and_odds` — `games` (FK→teams) + `game_odds_snapshots` (FK→games) + 7 indexes + RLS (public SELECT). Applied via Supabase SQL Editor. Replaces the "Planned Future Tables: schedules" entry.
 
 Applied via direct SQL (not tracked in migration system):
 - College name normalization — UPDATE players: Mississippi→Ole Miss, North Carolina State→NC State, Pittsburg→Pittsburgh, Virgina Tech→Virginia Tech, Miami (FL)→Miami, Brigham Young→BYU
@@ -1089,6 +1173,8 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `fbg_bowl_playoff_results` | 6,645 (4,371 for 2025, 2,274 for 2024) |
 | `fbg_bowl_draft_picks` | 138,000 (100,080 for 2025, 37,920 for 2024) |
 | `fbg_bowl_scores` | 6,900 (5,004 for 2025, 1,896 for 2024) |
+| `games` | 272 (2026 regular season; post fills in late Dec) |
+| `game_odds_snapshots` | 525 (day 1: 253 Odds API rows across 75 games × 10 books + 272 DraftKings rows covering full season) — grows daily |
 | `sleeper_leagues` | 12,629 (2026 dynasty leagues) |
 | `sleeper_trades` | 15,509 (from 3,972 leagues, Dec 2025 – Mar 2026) |
 | `sleeper_trade_assets` | 66,927 (26,682 players + 40,245 picks) |
@@ -1215,7 +1301,7 @@ Located in `data/imports/` (git-ignored):
 ## Planned Future Tables
 
 ### Team Tables (Phase 3)
-- `schedules` — Game schedule with scores, spreads, totals (standalone, beyond what's in team_game_stats)
+
 - `team_projections` — FBG/SportsData team projections
 
 ### Other Planned Data
@@ -1290,3 +1376,10 @@ Rookies added pre-NFL-Draft typically have `player_id` set to their Underdog UUI
 - Duplicate player records can exist when same player has both sportradar UUID and Underdog UUID — merge by moving FK references before deleting
 - 32 DEF records added to `players` table with `player_id = 'DEF_{ABBR}'` (e.g., `DEF_PHI`, `DEF_LAR`). `sleeper_id` = Sleeper abbreviation (LAR for Rams, matching Sleeper's format). `latest_team` uses normalized abbr (LA for Rams). Allows joining `fbg_bowl_draft_picks.sleeper_player_id = players.sleeper_id` for all positions
 - FBG Bowl draft picks: 93.3% match to players table (472/506 unique IDs). 34 unmatched are fringe/practice-squad players not worth adding
+- Sleeper schedule API returns 273 rows for 2026 regular season — 1 is `status='canceled'` (Week 6 DAL hosting SEA was moved). Filter `status != 'canceled'` to get the expected 272
+- nflreadr `load_schedules()` is **inconsistent**: `game_id` uses `LAR` for the Rams but the `home_team`/`away_team` columns use `LA`. The enrichment script matches on (season, week, home, away) — never `game_id` — to avoid this trap
+- `nflreadr::write_csv()` emits cp1252 (not UTF-8) for non-ASCII characters like `Levi's® Stadium`. Python loaders that read R-exported CSVs must open with `encoding="cp1252"`
+- The Odds API returns full team names (e.g. `"Kansas City Chiefs"`); use `TEAM_FULLNAME_TO_ABBR` from `scripts/ids/shared.py` to map to our `team_abbr`. Match to `games.game_id` by (date_ET, home_abbr, away_abbr) — Odds API's own event IDs are opaque and not reused across calls
+- `game_odds_snapshots` PK is (game_id, bookmaker, date) — same date upserts in place; daily run produces a new partition. Cheap re-runs via `--dry-run`
+- **The Odds API can lag the underlying sportsbooks**: on 2026-05-15 (day after schedule release) The Odds API only exposed 75 events even though DraftKings already had all 272 on the board. `fetch_draftkings_lines.py` scrapes DK directly via Playwright and got full season coverage. Use it as a primary source for early-offseason coverage; switch to Odds API as the default during season when 10-book consensus matters more than single-book completeness
+- DK sportsbook pages are behind Akamai bot mgmt (`sportsbook-nash.draftkings.com` returns 403 to plain urllib). Must drive headless Chromium so `_abck` / `bm_sz` cookies attach. Pagination via clicking `.cms-market-selector-load-more-button` (100 events per page; 2-3 clicks gets all 272)

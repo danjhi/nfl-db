@@ -1026,6 +1026,61 @@ News and intel items for the FF Intel System. Pipeline: draft → approved → p
 | `cascade_flags` | jsonb | Default `'[]'::jsonb` — downstream update triggers |
 | `created_at` | timestamptz NOT NULL | Default `now()` — when item entered pipeline |
 
+---
+
+#### ff-sim tables (owned by `~/dev/ff-sim`)
+
+Three tables + one view populated by the daily ff-sim publish pipeline (`ff-sim/scripts/publish_to_supabase.py`, runs 12 PM ET via GitHub Actions). Schema migrations live in `~/dev/ff-sim/sql/*.sql`; full design write-up in `~/dev/ff-sim/quarto/13_publish_pipeline.qmd`. nfl-db does NOT write to these tables — they're documented here only so downstream consumers (bestballbesty) and future audits know where the data lives.
+
+##### `sim_run_metadata`
+| Column | Type | Notes |
+|--------|------|-------|
+| `sim_version` | text PK | `{ff_sim_git_sha[:7]}_{team_projections_csv_mtime_iso}` — captures both inputs that affect outputs |
+| `run_started_at` / `run_completed_at` | timestamptz | UTC |
+| `n_sims` | integer | |
+| `scoring_format` | text | `half_ppr`, `ppr`, `standard` |
+| `team_yaml_dir`, `team_yaml_git_sha` | text | Provenance for the per-team YAML inputs |
+| `team_projections_csv`, `team_projections_csv_mtime` | text, timestamptz | Provenance for the per-game stat projections CSV |
+| `calibration_json`, `ff_sim_git_sha`, `vegas_scenario`, `notes` | text | |
+| `created_at` | timestamptz | Default `now()` |
+
+Retention: last 3 sim_versions only. Older rows deleted by the publish script; `ON DELETE CASCADE` removes dependent rows in the other two tables.
+
+##### `sim_player_projections`
+Per-sim per-player season grain. ~340 players × n_sims rows per sim_version (~10K = 3.4M rows). Required by the bestballbesty `/teams` Assumption Store filtering (per-sim grain lets the display layer re-rank under user-defined predicates).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `sim_version` | text NOT NULL | FK → `sim_run_metadata` ON DELETE CASCADE |
+| `sim_id` | integer NOT NULL | 0..n_sims-1 |
+| `player_id` | text NOT NULL | FK → `players(player_id)` |
+| `team` | text NOT NULL | FK → `teams(team_abbr)` |
+| `position` | text NOT NULL | |
+| `season_fp` | numeric(8,2) NOT NULL | |
+| `season_pass_fp` / `season_rush_fp` / `season_recv_fp` | numeric(8,2) | NULL until grid mod ships (deferred to v1.5) |
+| `money_won_contrib` | numeric(10,4) NOT NULL | Layer 1 attribution dollars |
+| `per_sim_rank` | integer NOT NULL | Rank within this sim by money_won_contrib |
+| PK | | (sim_version, sim_id, player_id) |
+
+##### `sim_player_agg`
+The 340-row-per-sim_version aggregate table. bestballbesty queries this on every page load for `/rankings` and Team Context.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `sim_version` | text NOT NULL | FK → `sim_run_metadata` ON DELETE CASCADE |
+| `player_id` | text NOT NULL | FK → `players(player_id)` |
+| `team` | text NOT NULL | FK → `teams(team_abbr)` |
+| `position`, `n_sims` | text, integer | |
+| `mean_season_fp`, `p25/p50/p75/p90_season_fp`, `sd_season_fp` | numeric | Season FP distribution |
+| `mean_/p50_/p90_season_{pass,rush,recv}_fp` | numeric | NULL until grid mod ships |
+| `mean_/p50_/p90_money_won_contrib` | numeric(10,4) | |
+| `mean_per_sim_rank`, `median_per_sim_rank`, `p25_/p75_per_sim_rank` | numeric(7,2) | Headline rank metric |
+| `adp_cohort_edge`, `adp_snapshot`, `adp_source`, `n_drafted_in_pool` | numeric, text, integer | Layer 2 ADP-cohort edge; NULL when player drafted on fewer than 30 rosters |
+| `created_at` | timestamptz | |
+| PK | | (sim_version, player_id) |
+
+Coverage: every drafted player gets a row even when `mean_money_won_contrib = 0`. Indexed on `(sim_version, mean_per_sim_rank)` and `(sim_version, position, mean_per_sim_rank)`.
+
 ### Views
 
 #### `view_draft_board`
@@ -1051,6 +1106,9 @@ View aggregating `player_stats` by (player_id, team, season). Joins to `players`
 Key columns: `player_id`, `first_name`, `last_name`, `position`, `team`, `season`, `games`, `pass_yds`, `pass_td`, `rush_yds`, `rush_td`, `receptions`, `rec_yds`, `rec_td`, `fantasy_points`/`_hppr`/`_ppr`, `fpg`/`_hppr`/`_ppr`, `fp_sd`/`_hppr`
 
 Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_fpg`, `off_recv_fpg`/`_hppr`/`_ppr`, `off_total_sd`, `qb_fpg`/`_hppr`/`_ppr`, `rb_fpg`/`_hppr`/`_ppr`, `wr_fpg`/`_hppr`/`_ppr`, `te_fpg`/`_hppr`/`_ppr`, `def_total_fpg`/`_hppr`/`_ppr`, `def_{pos}_fpg`/`_hppr`/`_ppr`, `off_*_sd`, `def_*_sd`
+
+#### `sim_player_agg_latest`
+Owned by ff-sim. Convenience view that exposes only the most-recent completed `sim_version` from `sim_player_agg`. bestballbesty queries this for the default rankings view; falls back to filtering `sim_player_agg` by `sim_version` directly for cross-run comparisons. Definition lives in `~/dev/ff-sim/sql/004_sim_player_agg_latest_view.sql`.
 
 ### Indexes
 

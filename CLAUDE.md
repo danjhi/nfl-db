@@ -389,6 +389,8 @@ Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/dra
 
 **Important**: All plists use `/usr/bin/python3 -c` with inline Python (pattern: `os.chdir(repo); exec(compile(open(script).read(), script, 'exec'))`). Do NOT use `/bin/bash` — bash under launchd cannot read files in `~/dev/` due to macOS security. The `com.apple.provenance` attribute on files created by VS Code/Claude is set by the OS and cannot be removed.
 
+**Also**: All long-running plists MUST include `-u` (unbuffered stdout — otherwise hangs produce no log output) and `signal.alarm(N)` at the top of the inline Python (wall-clock cap — without it, launchd won't spawn a new instance while the old one is hung, so a single stuck process silently kills every subsequent fire). Alarm budget: 600s (10 min) for ADP fetches, 10800s (3 hr) for sleeper trio (normal runtime ~70 min). Hang precedents: May 10 2026 underdog Chromium hung 1h58m; May 21–26 2026 sleeper trio hung 5 days on a Supabase REST call after "Upserted 54 leagues".
+
 To manage:
 - `launchctl load ~/Library/LaunchAgents/com.nfldb.daily-*.plist` — enable
 - `launchctl unload ...` — disable

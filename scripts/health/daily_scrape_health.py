@@ -160,6 +160,32 @@ def send_notification(title, body, sound=True):
     subprocess.run(["osascript", "-e", script], check=False)
 
 
+def send_email(subject, body):
+    """Send email via Gmail SMTP using app password. Silent no-op if env not configured."""
+    import smtplib
+    from email.message import EmailMessage
+
+    user = os.environ.get("GMAIL_USER", "danhindery@gmail.com")
+    pw = os.environ.get("GMAIL_APP_PASSWORD", "")
+    if not pw:
+        print("  (skipping email — GMAIL_APP_PASSWORD not set in .env)")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = user
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+            s.login(user, pw)
+            s.send_message(msg)
+        print(f"  Email sent: {subject}")
+    except Exception as e:
+        print(f"  Email send failed: {type(e).__name__}: {e}")
+
+
 def main():
     force = "--force" in sys.argv
 
@@ -211,17 +237,20 @@ def main():
 
     # Notify
     if failures:
-        title = f"NFL DB scrape FAIL ({len(failures)})"
+        failed_names = ", ".join(name for name, _ in failures)
+        title = f"[NFL DB] Scrape FAIL ({len(failures)}): {failed_names}"
         body_lines = [f"{name}: {reason}" for name, reason in failures[:3]]
         if len(failures) > 3:
             body_lines.append(f"…and {len(failures) - 3} more")
-        body = " | ".join(body_lines)
-        send_notification(title, body, sound=True)
+        short_body = " | ".join(body_lines)
+        send_notification(f"NFL DB scrape FAIL ({len(failures)})", short_body, sound=True)
+        send_email(title, summary + f"\n\nReport: {report_path}\n")
         print(f"\nNotification sent: {title}")
         sys.exit(1)
     elif force:
-        body = f"All {len([s for s in SOURCES if is_active(s['active'])])} sources OK"
-        send_notification("NFL DB scrape OK", body, sound=False)
+        active_count = len([s for s in SOURCES if is_active(s['active'])])
+        send_notification("NFL DB scrape OK", f"All {active_count} sources OK", sound=False)
+        send_email(f"[NFL DB] Scrape OK ({active_count} sources)", summary + "\n")
         print("\n[--force] Notification sent (success)")
     else:
         print("\nAll sources OK — no notification sent.")

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nfldb.laptop-health-check</string>
+
+    <!-- LAPTOP redundancy copy of the Desktop's com.nfldb.daily-health-check.
+         Runs at 14:00 (Desktop runs at 12:00). Reads shared Supabase and emails
+         danhindery@gmail.com only on failure, so if the Desktop is down its noon
+         check won't fire but this one still alerts on stale scrapes. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/danielhindery/dev/nfl-db/.venv/bin/python3</string>
+        <string>-c</string>
+        <string>
+import os, sys, datetime
+os.chdir('/Users/danielhindery/dev/nfl-db')
+print(f"{datetime.datetime.now()}: [laptop] Running daily scrape health check...")
+__file__ = 'scripts/health/daily_scrape_health.py'
+exec(compile(open(__file__).read(), __file__, 'exec'))
+print(f"{datetime.datetime.now()}: Done.")
+        </string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>14</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/danielhindery</string>
+        <key>SSL_CERT_FILE</key>
+        <string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+        <key>REQUESTS_CA_BUNDLE</key>
+        <string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danielhindery/dev/nfl-db/data/logs/health_check.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danielhindery/dev/nfl-db/data/logs/health_check.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(_script_dir, "..", "ids"))
 from shared import SUPABASE_URL  # noqa — triggers .env loading
 
 CHROME_PROFILE = os.environ.get("DK_CHROME_PROFILE", "Profile 2").strip("\"'")
-CHROME_PROFILE_DIR = f"/Users/dan/Library/Application Support/Google/Chrome/{CHROME_PROFILE}"
+CHROME_PROFILE_DIR = os.path.join(os.path.expanduser("~"), "Library/Application Support/Google/Chrome", CHROME_PROFILE)
 COOKIE_FILE = os.path.join(CHROME_PROFILE_DIR, "Cookies")
 
 SESSION_FILE = os.path.normpath(os.path.join(_script_dir, "..", "..", "data", "dk_session.json"))

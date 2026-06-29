@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(_script_dir, "..", "ids"))
 from shared import SUPABASE_URL, SUPABASE_KEY, ROOT_DIR  # noqa: E402
 
 LOG_DIR = os.path.join(ROOT_DIR, "data", "logs")
-SLEEPER_LOG_DIR = "/Users/dan/dev/sleeper-scrape/logs"
+SLEEPER_LOG_DIR = os.path.join(os.path.expanduser("~"), "dev", "sleeper-scrape", "logs")
 TODAY = datetime.date.today().isoformat()
 
 # Per-source thresholds + active windows + log file to grep for auth errors.

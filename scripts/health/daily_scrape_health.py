@@ -1,7 +1,11 @@
 """Daily health check for the ADP scrape pipeline.
 
-Runs at noon (after all morning scrapes have completed). For each expected
-ADP source, queries Supabase for today's row count and compares to a floor.
+Runs at 14:00. For each expected ADP source, checks that the most recent
+snapshot in Supabase is FRESH (retrieved within MAX_AGE_HOURS) and has at
+least `floor` rows. Freshness-based rather than "rows dated today" so a
+scrape that pushes after this check runs (the laptop trio can finish
+mid-afternoon) doesn't raise a false alarm — a genuinely missed day shows
+up as a ~46h-old snapshot at the next check.
 Also greps recent log files for auth errors and tracebacks. If anything's
 off, fires a macOS notification (banner + sound).
 
@@ -26,6 +30,11 @@ from shared import SUPABASE_URL, SUPABASE_KEY, ROOT_DIR  # noqa: E402
 LOG_DIR = os.path.join(ROOT_DIR, "data", "logs")
 SLEEPER_LOG_DIR = os.path.join(os.path.expanduser("~"), "dev", "sleeper-scrape", "logs")
 TODAY = datetime.date.today().isoformat()
+
+# A snapshot older than this is considered stale. Daily pushes land between
+# ~09:00 (desktop) and ~15:50 (laptop trio worst case: 13:20 start + stage
+# caps), so day-to-day jitter never exceeds ~26h; a missed day reads ~46h.
+MAX_AGE_HOURS = 28
 
 # Per-source thresholds + active windows + log file to grep for auth errors.
 # Sources outside their active window are skipped (no alert).
@@ -87,18 +96,40 @@ def is_active(active_window):
     return True
 
 
-def count_rows_today(source):
-    url = f"{SUPABASE_URL}/rest/v1/adp_sources?select=count&source=eq.{source}&date=eq.{TODAY}"
-    req = urllib.request.Request(url, headers={
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Prefer": "count=exact",
-    })
+def _get(url, extra_headers=None):
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    return urllib.request.urlopen(req, timeout=15)
+
+
+def latest_snapshot(source):
+    """Return (snapshot_date, age_hours, row_count) for the source's most
+    recent snapshot in adp_sources, or None on query failure. A source with
+    no rows at all returns (None, None, 0).
+    """
+    import json
+
     try:
-        resp = urllib.request.urlopen(req, timeout=15)
+        url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
+               f"?select=date,retrieved_at&source=eq.{source}"
+               f"&order=retrieved_at.desc&limit=1")
+        rows = json.loads(_get(url).read().decode("utf-8"))
+        if not rows:
+            return (None, None, 0)
+        snap_date = rows[0]["date"]
+        retrieved = datetime.datetime.fromisoformat(rows[0]["retrieved_at"])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age_hours = (now - retrieved).total_seconds() / 3600
+
+        url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
+               f"?select=count&source=eq.{source}&date=eq.{snap_date}")
+        resp = _get(url, {"Prefer": "count=exact"})
         cr = resp.headers.get("content-range", "")
-        return int(cr.split("/")[-1]) if cr else 0
-    except Exception as e:
+        count = int(cr.split("/")[-1]) if cr else 0
+        return (snap_date, age_hours, count)
+    except Exception:
         return None  # treat as failure
 
 
@@ -199,17 +230,28 @@ def main():
             summary_lines.append(f"  SKIP   {src['name']:25s} (outside active window)")
             continue
 
-        n = count_rows_today(src["name"])
-        if n is None:
+        snap = latest_snapshot(src["name"])
+        if snap is None:
             failures.append((src["name"], "Supabase query failed"))
             summary_lines.append(f"  ERROR  {src['name']:25s} Supabase query failed")
             continue
 
-        status = "OK" if n >= src["floor"] else "FAIL"
-        line = f"  {status:6s} {src['name']:25s} {n:>5} rows (floor {src['floor']})"
-        summary_lines.append(line)
-        if n < src["floor"]:
-            failures.append((src["name"], f"{n} rows < floor {src['floor']}"))
+        snap_date, age_hours, n = snap
+        reasons = []
+        if snap_date is None:
+            reasons.append("no rows in adp_sources")
+        else:
+            if age_hours > MAX_AGE_HOURS:
+                reasons.append(f"stale: last push {age_hours:.0f}h ago (max {MAX_AGE_HOURS}h)")
+            if n < src["floor"]:
+                reasons.append(f"{n} rows < floor {src['floor']}")
+
+        status = "FAIL" if reasons else "OK"
+        detail = (f"{n:>5} rows @ {snap_date} ({age_hours:.1f}h ago, floor {src['floor']})"
+                  if snap_date else "no rows")
+        summary_lines.append(f"  {status:6s} {src['name']:25s} {detail}")
+        if reasons:
+            failures.append((src["name"], "; ".join(reasons)))
 
         # Scan associated logs for errors
         for log_path in src["logs"]:

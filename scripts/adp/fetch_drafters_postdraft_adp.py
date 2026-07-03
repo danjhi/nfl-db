@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -51,7 +52,7 @@ def get_jwt():
     return token
 
 
-def fetch_drafters_players(jwt):
+def fetch_drafters_players(jwt, attempts=3, backoff=30):
     req = urllib.request.Request(
         DRAFTERS_API_URL,
         headers={
@@ -60,17 +61,28 @@ def fetch_drafters_players(jwt):
             "User-Agent": "Mozilla/5.0",
         },
     )
-    try:
-        resp = urllib.request.urlopen(req)
-        data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            print("ERROR: 401 Unauthorized — DRAFTERS_JWT has expired.")
-            print("  Update DRAFTERS_JWT in .env with a fresh token from your browser's localStorage.")
-        else:
+    data = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+            data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print("ERROR: 401 Unauthorized — DRAFTERS_JWT has expired.")
+                print("  Update DRAFTERS_JWT in .env with a fresh token from your browser's localStorage.")
+                sys.exit(1)
             body = e.read().decode("utf-8", errors="replace")
             print(f"ERROR: HTTP {e.code}: {body[:200]}")
-        sys.exit(1)
+            if attempt == attempts:
+                sys.exit(1)
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+            # Transient network failure (connection reset, DNS stall, timeout)
+            print(f"  Network error (attempt {attempt}/{attempts}): {e}")
+            if attempt == attempts:
+                print("ERROR: All fetch attempts failed.")
+                sys.exit(1)
+        time.sleep(backoff)
 
     players = data.get("entities", {}).get("players", [])
     if not players:

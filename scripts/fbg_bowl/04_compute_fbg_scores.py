@@ -1,4 +1,4 @@
-"""Compute FBG Bowl meta-scores from standings and playoff results.
+"""Compute FBG Bowl meta-scores from standings and playoff advancement.
 
 Usage:
   python3 scripts/fbg_bowl/04_compute_fbg_scores.py [--year 2025]
@@ -7,21 +7,29 @@ Scoring system:
   +1   per regular-season win (wins through week 14)
   +35  for 1st place in your league (week 14 standings)
   +10  for 2nd place in your league (week 14 standings)
-  +35  for making the semifinals (score in week 16)
-  +35  for making the finals     (score in week 17)
+  +35  for making the semifinals (surviving the week-15 cut)
+  +35  for making the finals     (surviving the week-16 cut)
   +300/200/150/125/100/85/70/55/45/35  for top 10 overall final rank
 
-Final rank is based on: reg_season_ppg × 14 + week15_pts + week16_pts + week17_pts
-(i.e., total season + playoff points, where reg_season contribution = total regular season pts)
+The playoff has weekly CUTS — having a Sleeper score in week 16/17 does NOT
+mean a team advanced (Sleeper scores everyone). Advancement and final rank
+come from data/fbg_bowl/advancement_{year}.csv, built by
+06_backfill_playoff_advancement.py from Dan's published sheets/R exports.
+Final rank = reg-season PPG + wk15 + wk16 + wk17 points, ranked among
+finalists only. (Historic bug fixed 2026-07-07: this script previously
+awarded semi/finals bonuses to every qualifier and ranked everyone by TOTAL
+season points + playoff points, which scrambled top-10 bonuses and ranks.)
 
 Clears fbg_bowl_scores for the year before re-inserting (idempotent).
 """
 
+import csv
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from shared import supa_get, supa_batch_insert, supa_delete
 
 YEAR = 2025
+DATA = os.path.join(os.path.dirname(__file__), "..", "..", "data", "fbg_bowl")
 
 TOP10_BONUS = {1: 300, 2: 200, 3: 150, 4: 125, 5: 100,
                6: 85,  7: 70,  8: 55,  9: 45,  10: 35}
@@ -47,39 +55,39 @@ def main():
     standings_14 = [s for s in standings_14 if s["league_id"] in year_lid_set]
     print(f"  Week-14 standings rows: {len(standings_14)}")
 
-    # ── Load playoff results ───────────────────────────────────────────────────
-    playoff_rows = supa_get(
-        "fbg_bowl_playoff_results",
-        select="roster_id,week,pts_for",
-    )
-    # Pivot: roster_id → {15: pts, 16: pts, 17: pts}
+    # ── Load playoff advancement ground truth ──────────────────────────────────
+    adv_path = os.path.join(DATA, f"advancement_{YEAR}.csv")
+    if not os.path.exists(adv_path):
+        sys.exit(f"Missing {adv_path} — run 06_backfill_playoff_advancement.py --year {YEAR} first")
+    made_semi, made_final, final_rank_map, final_total_map = set(), set(), {}, {}
+    with open(adv_path) as f:
+        for row in csv.DictReader(f):
+            rid = int(row["roster_id"])
+            if row["made_semi"] == "1":
+                made_semi.add(rid)
+            if row["made_final"] == "1":
+                made_final.add(rid)
+                final_rank_map[rid] = int(row["final_rank"])
+                final_total_map[rid] = float(row["final_total"])
+    print(f"  Semifinalists: {len(made_semi)}, Finalists: {len(made_final)}")
+
+    # ── Cross-validate ground truth against DB points ──────────────────────────
+    # Final total should equal reg-season PPG + wk15 + wk16 + wk17 from our data.
+    playoff_rows = supa_get("fbg_bowl_playoff_results", select="roster_id,week,pts_for")
     playoff_pts = {}
     for row in playoff_rows:
-        rid = row["roster_id"]
-        wk = row["week"]
-        pts = float(row["pts_for"] or 0)
-        if rid not in playoff_pts:
-            playoff_pts[rid] = {}
-        playoff_pts[rid][wk] = pts
-
-    made_w16 = {rid for rid, wks in playoff_pts.items() if 16 in wks and wks[16] > 0}
-    made_w17 = {rid for rid, wks in playoff_pts.items() if 17 in wks and wks[17] > 0}
-    print(f"  Rosters with week-16 score: {len(made_w16)}")
-    print(f"  Rosters with week-17 score: {len(made_w17)}")
-
-    # ── Compute total score for final rank ─────────────────────────────────────
-    # Total score = reg_season_pts + w15 + w16 + w17
-    roster_totals = {}
-    for s in standings_14:
-        rid = s["roster_id"]
-        reg_pts = float(s["pts_for"] or 0)
-        play_data = playoff_pts.get(rid, {})
-        total = reg_pts + play_data.get(15, 0) + play_data.get(16, 0) + play_data.get(17, 0)
-        roster_totals[rid] = total
-
-    # Rank ALL rosters by total (including non-playoff teams, who just have reg pts)
-    all_rids_ranked = sorted(roster_totals.keys(), key=lambda r: -roster_totals[r])
-    final_rank_map = {rid: rank for rank, rid in enumerate(all_rids_ranked, 1)}
+        playoff_pts.setdefault(row["roster_id"], {})[row["week"]] = float(row["pts_for"] or 0)
+    pts14 = {s["roster_id"]: float(s["pts_for"] or 0) for s in standings_14}
+    worst = (0.0, None)
+    for rid in made_final:
+        p = playoff_pts.get(rid, {})
+        recomputed = pts14.get(rid, 0) / 14 + p.get(15, 0) + p.get(16, 0) + p.get(17, 0)
+        diff = abs(recomputed - final_total_map[rid])
+        if diff > worst[0]:
+            worst = (diff, rid)
+    print(f"  Cross-check vs DB (PPG + wk15-17): max |diff| = {worst[0]:.2f} pts (roster {worst[1]})")
+    if worst[0] > 2.0:
+        sys.exit("  Ground-truth totals disagree with DB recomputation beyond tolerance — investigate")
 
     # ── Compute meta-scores ────────────────────────────────────────────────────
     score_rows = []
@@ -90,10 +98,10 @@ def main():
 
         reg_wins = wins
         league_rank_bonus = 35 if lrank == 1 else (10 if lrank == 2 else 0)
-        semi_bonus = 35 if rid in made_w16 else 0
-        finals_bonus = 35 if rid in made_w17 else 0
-        final_rank = final_rank_map.get(rid, 0)
-        top10_bonus = TOP10_BONUS.get(final_rank, 0)
+        semi_bonus = 35 if rid in made_semi else 0
+        finals_bonus = 35 if rid in made_final else 0
+        final_rank = final_rank_map.get(rid)
+        top10_bonus = TOP10_BONUS.get(final_rank, 0) if final_rank else 0
 
         total = reg_wins + league_rank_bonus + semi_bonus + finals_bonus + top10_bonus
 
@@ -109,8 +117,12 @@ def main():
             "overall_rank": None,  # filled after sorting
         })
 
-    # Rank by total_score DESC
-    score_rows.sort(key=lambda r: -r["total_score"])
+    # Rank by total_score DESC; break ties by playoff finish, then reg-season pts
+    score_rows.sort(key=lambda r: (
+        -r["total_score"],
+        final_rank_map.get(r["roster_id"], 10**6),
+        -pts14.get(r["roster_id"], 0),
+    ))
     for i, row in enumerate(score_rows, 1):
         row["overall_rank"] = i
 

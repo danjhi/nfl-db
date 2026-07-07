@@ -200,15 +200,20 @@ Complete ETL pipeline for FBG Bowl historical data. Both 2024 and 2025 fully loa
 | `03_fetch_draft_picks.py` | Fetch draft picks from Sleeper → `fbg_bowl_draft_picks` (100K+ rows) |
 | `04_compute_fbg_scores.py` | Compute FBG Bowl meta-scores (wins + league bonus + semi/finals + top-10 bonuses) → `fbg_bowl_scores` |
 | `05_validate.py` | Validate DB against local CSVs and Google Sheets. Checks row counts, week-14 standings, playoff sheet |
+| `06_backfill_playoff_advancement.py` | Build `data/fbg_bowl/advancement_{year}.csv` (who made semis/finals + final rank) from Dan's published sheets/R exports; `--write-db` PATCHes `fbg_bowl_playoff_results.final_rank`. Required input for `04`. |
 | `schema.sql` | DDL for all 7 tables. Applied via pg8000 (Management API blocked) |
 
-**Scoring formula**: 1pt/win + 35 (1st in league) or 10 (2nd) + 35 (semi, week 16) + 35 (finals, week 17) + top-10 bonus (300/200/150/125/100/85/70/55/45/35)
+**Scoring formula**: 1pt/win + 35 (1st in league) or 10 (2nd) + 35 (reached semifinal round, week 16) + 35 (reached finals round, week 17) + top-10 bonus (300/200/150/125/100/85/70/55/45/35)
 
 **Playoff qualification**: league_rank ≤ 2 OR pts_for ≥ 1920 after week 14
 
+**Playoff structure (CRITICAL — burned us once, fixed 2026-07-07)**: weeks 15–17 have a CUT after each week (2024: 764 qualifiers → 543 semis → 136 finalists; 2025: 1,457 → 729 → 365). Sleeper records scores for EVERY roster in weeks 15–17 regardless of advancement — never infer advancement from score presence. Final rank (drives the top-10 bonus and decides the champion) = reg-season **PPG** + wk15 + wk16 + wk17 points, ranked among finalists only. Advancement ground truth: `06_backfill_playoff_advancement.py` (sources: Dan's Google Sheets for 2024, R `.rds` exports in `~/Desktop/r2024/fbg_bowl_standings_new/` for 2025, staged into `data/fbg_bowl/`). `04_compute_fbg_scores.py` refuses to run without `advancement_{year}.csv`. Champions: 2024 Huskers707195, 2025 AIMachine.
+
+**Division 0144 repair (2026-07-07)**: the 2024 league-IDs CSV carried a corrupted sleeper_id for Division 0144 (`1116083898404864` — digits lost; real id `1118724071493046272`, recovered via Sleeper user→leagues lookup). League row 838 patched, then rosters/matchups/picks/playoffs backfilled with normal ETL reruns (scripts skip already-loaded leagues, so full-year reruns are safe).
+
 **2025 data loaded** (as of Feb 2026): 417 leagues, 5,004 rosters, 70,056 weekly results, 4,371 playoff results, 100,080 draft picks, 5,004 scores
 
-**2024 data loaded** (as of Feb 2026): 159 leagues, 1,896 rosters, 26,544 weekly results, 2,274 playoff results, 37,920 draft picks, 1,896 scores. League IDs extracted from standings column (deduplicated from 1,896 rows × 12 teams). Saved to `FBG Bowl 2024 League IDs.csv`.
+**2024 data loaded** (as of 2026-07-07, incl. Division 0144 repair): 159 leagues, 1,908 rosters, 26,712 weekly results, 2,292 playoff results, 38,160 draft picks, 1,908 scores. League IDs extracted from standings column (deduplicated from 1,896 rows × 12 teams). Saved to `FBG Bowl 2024 League IDs.csv`.
 
 ### Sleeper Trade Data (`scripts/sleeper/`)
 
@@ -1083,6 +1088,44 @@ The 340-row-per-sim_version aggregate table. bestballbesty queries this on every
 
 Coverage: every drafted player gets a row even when `mean_money_won_contrib = 0`. Indexed on `(sim_version, mean_per_sim_rank)` and `(sim_version, position, mean_per_sim_rank)`.
 
+---
+
+#### ff-rankings tables (owned by `~/dev/ff-rankings`)
+
+Two tables + one view populated by the ff-rankings publish job (`ff-rankings/ff_rankings/publish/`, `python -m ff_rankings.publish <run_dir>`), which distills the ff-stat-sim Parquet matrix (per-(sim, player, week) counting stats, ~1,000 sims). NEW parallel table set — the FP-era `sim_player_agg` tables above belong to dead ff-sim and are left untouched. Migrations live in `~/dev/ff-rankings/sql/*.sql`; nfl-db does NOT write to these tables. First published 2026-07-02 (`sim_version=clean-2026-07-02`, 485 players).
+
+##### `sim_stat_run_metadata`
+| Column | Type | Notes |
+|--------|------|-------|
+| `sim_version` | text PK | Engine run-dir name (e.g. `clean-2026-07-02`, `ci-2026-07-03`) |
+| `engine_sha` / `inputs_sha` | text | ff-stat-sim + 2026-nfl-projections git SHAs (full provenance) |
+| `n_sims`, `seed` | integer | |
+| `matrix_rows`, `n_players`, `runtime_s` | bigint, integer, numeric | From the engine's run_metadata.json |
+| `published_at` | timestamptz | Default `now()`; orders the `_latest` view + retention |
+
+Retention: last 3 sim_versions; older rows deleted by the publish job (`ON DELETE CASCADE` clears `sim_stat_player_agg`).
+
+##### `sim_stat_player_agg`
+Per-player distillation of the matrix: ~485 rows per sim_version. Counting-stat means over sims of season totals, p10/p50/p90 on the five tail stats, games, and derived half-/full-PPR FP percentiles (computed at distill time from per-sim FP totals — NOT generated columns). Consumers: bestballbesty `/rankings` range-of-outcomes + the Projection Comparison Site.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `sim_version` | text NOT NULL | FK → `sim_stat_run_metadata` ON DELETE CASCADE |
+| `player_id` | text NOT NULL | FK → `players(player_id)` (Sportradar UUID) |
+| `team` | text NOT NULL | FK → `teams(team_abbr)` |
+| `pos`, `n_sims` | text, integer | |
+| `mean_{pass_att,pass_cmp,pass_yds,pass_td,pass_int,sacks,carries,rush_yds,rush_td,targets,receptions,rec_yds,rec_td,fumbles_lost,total_td}` | numeric(8,2) | Season-total means over sims |
+| `mean_games`, `p10_/p90_games` | numeric(4,1) | games = Σ is_active; QBs use Σ started |
+| `p10_/p50_/p90_{receptions,rec_yds,rush_yds,pass_yds,total_td}` | numeric(8,1) | Tail-stat percentiles across the sim axis |
+| `mean_/p10_/p50_/p90_hppr_fp`, `mean_/p10_/p50_/p90_ppr_fp` | numeric(8,2) | Derived FP (standard −2 INT/−2 fum + 0.5/1.0 per rec) |
+| `created_at` | timestamptz | |
+| PK | | (sim_version, player_id) |
+
+Indexed on `(sim_version, pos)` and `(sim_version, mean_hppr_fp desc)`. RLS: public SELECT.
+
+##### `sim_stat_contest_player`
+Per-contest player rankings — one row per (sim_version, contest, player) for players drafted in that contest's field. Populated by `ff-rankings/ff_rankings/publish/contest_rankings.py`. `contest` ∈ {`drafters`, `draftkings`, `underdog`}. Key columns: headline metrics — `mean_vorp_season_fp` (Drafters: lineup-aware season-FP VORP vs position-matched ~ADP-100 replacement) and `vorp_equity` (DK/Underdog: cost-neutral bracket VORP in dollars — expected tournament winnings added over the replacement, swap re-priced through frozen per-sim advancement curves; added 2026-07-02 after attributed equity proved draft-cost-confounded); `mean_season_fp` (under the contest's own scoring), `mean_money_won_contrib` (lineup-share dollar attribution — the market/value column), `n_rosters_drafted`/`exposure_pct`, `replacement_player_id`, bracket columns (`advance_rate_r2/r3/r4`, `expected_payout`). PK (sim_version, contest, player_id); FKs to `sim_stat_run_metadata` (cascade), `players`, `teams`. Indexed on `(sim_version, contest, mean_vorp_season_fp desc)`. RLS: public SELECT. First published 2026-07-02 (drafters, 370 rows).
+
 ### Views
 
 #### `view_draft_board`
@@ -1111,6 +1154,9 @@ Key columns: `games`, `off_total_fpg`/`_hppr`/`_ppr`, `off_pass_fpg`, `off_rush_
 
 #### `sim_player_agg_latest`
 Owned by ff-sim. Convenience view that exposes only the most-recent completed `sim_version` from `sim_player_agg`. bestballbesty queries this for the default rankings view; falls back to filtering `sim_player_agg` by `sim_version` directly for cross-run comparisons. Definition lives in `~/dev/ff-sim/sql/004_sim_player_agg_latest_view.sql`.
+
+#### `sim_stat_player_agg_latest`
+Owned by ff-rankings. All `sim_stat_player_agg` rows for the most-recently published `sim_version` (ordered by `sim_stat_run_metadata.published_at`). Uses `security_invoker = true`. Definition lives in `~/dev/ff-rankings/sql/003_sim_stat_player_agg_latest_view.sql`.
 
 ### Indexes
 

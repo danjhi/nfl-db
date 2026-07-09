@@ -6,7 +6,11 @@ NFL Database — central repo for managing the Supabase database used across all
 
 ## Obsidian Vault — Sync Rules
 
-Vault path: `/Users/dan/obsidian-vault/Fantasy Football/`
+Vault path (device-dependent — the vault is the same, synced across devices):
+- **Laptop (primary device going forward):** `/Users/danielhindery/dev/full_vault/Fantasy Football/`
+- **Desktop/Mac mini:** `/Users/dan/obsidian-vault/Fantasy Football/`
+
+Detect which machine you're on (e.g. `whoami` → `danielhindery` = laptop) and use the matching path. If neither exists, the vault isn't mounted on this device — skip vault updates and note it.
 
 **Always update the vault proactively — without waiting to be asked — whenever any of the following happen:**
 
@@ -138,6 +142,7 @@ Scripts are organized by data source.
 | `fetch_draftkings_postdraft_adp.py` | **Post-draft** DK ADP fetch → upsert into adp_sources (`source="draftkings_postdraft"`). Different draftgroup ID (`146136` vs `141336` pre-draft). Reuses existing `data/dk_session.json` (same DK login). |
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
+| `fetch_rtsports_adp.py` | Fetch RTSports public ADP XML feed (`www.rtsports.com/api-adp-xml?TYPE=PPR`) → match by name+position → upsert into adp_sources (`source="rtsports"`). Covers offense + K + team DEF. First of the footballguys.com/adp per-source scrapers (MFL/CBS/ESPN/SHGN next). `--dry-run`, `--type`, `--limit`. Requires kickers + DEF `footballguys_id` to join downstream — see `docs/adp-kicker-defense-join.md`. Use `www` host (valid cert); RTSports requires a live link-back wherever displayed. |
 
 ### Games / Schedule (`scripts/games/`)
 

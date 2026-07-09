@@ -6,7 +6,11 @@ NFL Database — central repo for managing the Supabase database used across all
 
 ## Obsidian Vault — Sync Rules
 
-Vault path: `/Users/dan/obsidian-vault/Fantasy Football/`
+Vault path (device-dependent — the vault is the same, synced across devices):
+- **Laptop (primary device going forward):** `/Users/danielhindery/dev/full_vault/Fantasy Football/`
+- **Desktop/Mac mini:** `/Users/dan/obsidian-vault/Fantasy Football/`
+
+Detect which machine you're on (e.g. `whoami` → `danielhindery` = laptop) and use the matching path. If neither exists, the vault isn't mounted on this device — skip vault updates and note it.
 
 **Always update the vault proactively — without waiting to be asked — whenever any of the following happen:**
 
@@ -77,6 +81,7 @@ Scripts are organized by data source.
 | `build_clean_dataset.py` | Filter to Rotowire OC, enrich via nflreadr, fix times_drafted from draft_picks, output CSVs to `data/clean/` |
 | `load_to_supabase.py` | Load clean CSVs into Supabase via REST API |
 | `build_player_seasons.R` | Build player-season-team CSV from nflreadr rosters (requires R + nflreadr) |
+| `backfill_team_fbg_ids.py` | Backfill `footballguys_id` on the clean `DEF_{TEAM}` team-defense rows (`{pfr3}xxx99`, e.g. `DEF_HOU`→`htxxxx99`) so the footballguys.com/adp page's defenses join. Idempotent; also clears the same id off legacy NFFC TDSP artifact rows so `DEF_{TEAM}` is the unique owner. `--dry-run` default previews; `--include-artifacts` re-enables the (unsafe, colliding) TDSP/TK backfill. See `docs/adp-kicker-defense-join.md` |
 
 ### Player ID Matching (`scripts/ids/`)
 
@@ -93,6 +98,7 @@ Scripts are organized by data source.
 | `match_sportsdata_rookies.py` | Fetch rookies by season from SportsData.io → sportsdata/fanduel/dk IDs |
 | `update_supabase_ids.py` | Merge all matched JSONs and PATCH players in Supabase |
 | `add_missing_players.py` | Insert players from Underdog top 500 not in DB |
+| `add_current_kickers.py` | Insert current starting kickers (PK) missing from DB, keyed on Sleeper sportradar_id, with `footballguys_id` from FBG's pk list. Makes kickers join on the footballguys.com/adp page. `--dry-run` supported. See `docs/adp-kicker-defense-join.md` |
 | `generate_update_sql.py` | Generate .sql file for bulk updates via Management API |
 | `load_underdog_adp.py` | Load Underdog ADP CSV into adp_sources table via REST API |
 | `match_dan_ids.py` | Bootstrap dan_id on players + initial dynasty_values load from CSV |
@@ -136,6 +142,7 @@ Scripts are organized by data source.
 | `fetch_draftkings_postdraft_adp.py` | **Post-draft** DK ADP fetch → upsert into adp_sources (`source="draftkings_postdraft"`). Different draftgroup ID (`146136` vs `141336` pre-draft). Reuses existing `data/dk_session.json` (same DK login). |
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
+| `fetch_rtsports_adp.py` | Fetch RTSports public ADP XML feed (`www.rtsports.com/api-adp-xml?TYPE=PPR`) → match by name+position → upsert into adp_sources (`source="rtsports"`). Covers offense + K + team DEF. First of the footballguys.com/adp per-source scrapers (MFL/CBS/ESPN/SHGN next). `--dry-run`, `--type`, `--limit`. Requires kickers + DEF `footballguys_id` to join downstream — see `docs/adp-kicker-defense-join.md`. Use `www` host (valid cert); RTSports requires a live link-back wherever displayed. |
 
 ### Games / Schedule (`scripts/games/`)
 
@@ -1489,3 +1496,4 @@ Rookies added pre-NFL-Draft typically have `player_id` set to their Underdog UUI
 - `game_odds_snapshots` PK is (game_id, bookmaker, date) — same date upserts in place; daily run produces a new partition. Cheap re-runs via `--dry-run`
 - **The Odds API can lag the underlying sportsbooks**: on 2026-05-15 (day after schedule release) The Odds API only exposed 75 events even though DraftKings already had all 272 on the board. `fetch_draftkings_lines.py` scrapes DK directly via Playwright and got full season coverage. Use it as a primary source for early-offseason coverage; switch to Odds API as the default during season when 10-book consensus matters more than single-book completeness
 - DK sportsbook pages are behind Akamai bot mgmt (`sportsbook-nash.draftkings.com` returns 403 to plain urllib). Must drive headless Chromium so `_abck` / `bm_sz` cookies attach. Pagination via clicking `.cms-market-selector-load-more-button` (100 events per page; 2-3 clicks gets all 272)
+- FBG team-defense id `{pfr3}xxx99` (e.g. `htxxxx99`) must be owned by exactly ONE players row — the clean `DEF_{TEAM}` row — or the footballguys.com/adp fixture's `footballguys_id → player_id` map (last-write-wins) resolves it nondeterministically. Legacy NFFC `TDSP` "team name" rows carried the same id and had to be cleared (`backfill_team_fbg_ids.py` step 2). Do NOT run that script with `--include-artifacts` (or re-backfill TDSP/TK) — it reintroduces the collision. The TDSP rows themselves are kept (referenced by historical `adp`/`draft_picks`/`player_projections`); only their duplicate `footballguys_id` is nulled. Kickers live under `PK` (nfl-db) but ADP feeds emit `K`; scrapers match via name-only fallback + the `andres borregales`↔`andy borregales` alias in `shared.py`. See `docs/adp-kicker-defense-join.md`

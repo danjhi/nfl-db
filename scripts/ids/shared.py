@@ -135,6 +135,9 @@ PLAYER_ALIASES = {
     "zonovan knight": "bam knight",
     "mitch tinsley": "mitchell tinsley",
     "mitchell tinsley": "mitch tinsley",
+    # Kicker: stored/ADP-feed spelling "Andres"; Sleeper + FBG spell it "Andy".
+    "andres borregales": "andy borregales",
+    "andy borregales": "andres borregales",
 }
 
 

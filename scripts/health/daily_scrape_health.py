@@ -55,6 +55,23 @@ SOURCES = [
         "logs": [os.path.join(LOG_DIR, "draftkings_postdraft_adp.log")],
     },
     {
+        # footballguys.com/adp own scraper (laptop-primary, draft season).
+        "name": "rtsports", "floor": 200,
+        "active": ("2026-07-10", "2026-09-10"),
+        "logs": [os.path.join(LOG_DIR, "rtsports_adp.log")],
+    },
+    {
+        # NFFC OC (FBG Online Championship). Same log as `nffc` (one script).
+        "name": "nffc_oc", "floor": 300,
+        "active": ("2026-07-10", "2026-09-10"),
+        "logs": [os.path.join(LOG_DIR, "nffc_adp.log")],
+    },
+    {
+        "name": "nffc", "floor": 400,
+        "active": ("2026-07-10", "2026-09-10"),
+        "logs": [os.path.join(LOG_DIR, "nffc_adp.log")],
+    },
+    {
         "name": "sleeper_sf", "floor": 400,
         "active": (None, None),  # always-on
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],

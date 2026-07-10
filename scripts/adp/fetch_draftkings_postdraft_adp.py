@@ -13,9 +13,11 @@ Usage:
 """
 
 import datetime
+import http.client
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -92,43 +94,55 @@ def fetch_dk_players():
     return players
 
 
-def fetch_players_with_dk_id():
+def _get_json(url, headers, attempts=4, backoff=5):
+    """GET + parse JSON, retrying transient network errors.
+
+    Supabase's chunked responses occasionally truncate mid-read
+    (http.client.IncompleteRead) — a one-off that killed the daily job. That
+    exception is an HTTPException, NOT an OSError, so it needs to be caught
+    explicitly. Real HTTP errors (401/403/5xx) are re-raised immediately (retry
+    won't help).
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, ConnectionError, TimeoutError,
+                OSError, http.client.IncompleteRead) as e:
+            if attempt == attempts:
+                raise
+            print(f"  Network retry {attempt}/{attempts}: {type(e).__name__}: {e}")
+            time.sleep(backoff)
+
+
+def _fetch_players_paginated(select, extra=""):
     key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
     players = []
     offset = 0
     while True:
-        url = (
-            f"{SUPABASE_URL}/rest/v1/players"
-            f"?select=player_id,draftkings_id,first_name,last_name,position"
-            f"&draftkings_id=not.is.null"
-            f"&offset={offset}&limit=1000"
-        )
-        req = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
-        batch = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+        url = (f"{SUPABASE_URL}/rest/v1/players?select={select}{extra}"
+               f"&offset={offset}&limit=1000")
+        batch = _get_json(url, headers)
         if not batch:
             break
         players.extend(batch)
         offset += 1000
     return players
+
+
+def fetch_players_with_dk_id():
+    return _fetch_players_paginated(
+        "player_id,draftkings_id,first_name,last_name,position",
+        "&draftkings_id=not.is.null",
+    )
 
 
 def fetch_all_players_for_name_match():
-    key = SUPABASE_SERVICE_KEY or SUPABASE_KEY
-    players = []
-    offset = 0
-    while True:
-        url = (
-            f"{SUPABASE_URL}/rest/v1/players"
-            f"?select=player_id,first_name,last_name,position"
-            f"&offset={offset}&limit=1000"
-        )
-        req = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
-        batch = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
-        if not batch:
-            break
-        players.extend(batch)
-        offset += 1000
-    return players
+    return _fetch_players_paginated("player_id,first_name,last_name,position")
 
 
 def batch_upsert(rows, batch_size=100):

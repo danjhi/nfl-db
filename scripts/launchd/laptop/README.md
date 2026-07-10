@@ -17,6 +17,7 @@ day just overwrites the same rows — no duplicates.
 | `com.nfldb.laptop-rtsports-adp` | 13:15 | — (laptop-primary; `source=rtsports`) |
 | `com.nfldb.laptop-nffc-adp` | 13:20 | — (laptop-primary; `source=nffc_oc` + `nffc` + `bestball10s`) |
 | `com.nfldb.laptop-espn-adp` | 13:25 | — (laptop-primary; `source=espn`) |
+| `com.nfldb.laptop-cbs-adp` | 13:30 | — (laptop-primary; `source=cbs`) |
 | `com.nfldb.laptop-health-check` | 14:00 | daily-health-check (12:00) |
 
 The two own-source scrapers are date-gated `20260710`–`20260910` (draft season) inline;
@@ -40,7 +41,8 @@ Championship) — bump yearly.
 cp scripts/launchd/laptop/com.nfldb.laptop-*.plist ~/Library/LaunchAgents/
 for L in com.nfldb.laptop-drafters-postdraft-adp com.nfldb.laptop-underdog-postdraft-adp \
          com.nfldb.laptop-draftkings-postdraft-adp com.nfldb.laptop-rtsports-adp \
-         com.nfldb.laptop-nffc-adp com.nfldb.laptop-espn-adp com.nfldb.laptop-health-check; do
+         com.nfldb.laptop-nffc-adp com.nfldb.laptop-espn-adp com.nfldb.laptop-cbs-adp \
+         com.nfldb.laptop-health-check; do
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$L.plist
 done
 launchctl list | grep nfldb.laptop          # verify

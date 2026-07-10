@@ -178,6 +178,16 @@ Scripts are organized by data source.
 |--------|---------|
 | `push_writeups.py` | Read `data/writeups/player_writeups.yaml`, filter non-empty writeups, upsert into `player_notes` via REST API. Supports `--dry-run` |
 
+### News (`scripts/news/`)
+
+FBG "News and Notes" pipeline → `news_items` (status='draft' for review). Items resolve to a player, get a rules-based `news_type`, and upsert **insert-only on `source_url`** (a human's later status changes survive re-runs). Unresolved players (NOT NULL) are skipped + logged to `data/logs/fbg_news_unresolved.jsonl`.
+
+| Script | Purpose |
+|--------|---------|
+| `news_shared.py` | Shared: player name-index resolution (earliest-mention wins, ported from `fbg-adp-demo/scripts/build-news.mjs`), `news_type` keyword classifier, `to_row()`, insert-only `upsert_news()` |
+| `backfill_staged_news.py` | One-time: load `staging/fbg-daily-news/news_items.jsonl` (652 email-parsed items, Apr 27–Jul 5) → `news_items`. Loaded 485 (88% resolved; rest are UDFA not in DB). `--dry-run`, `--file` |
+| `fetch_fbg_news.py` | **Daily**: scrape `footballguys.com/updates` (Past-Issues listing → date↔`?view={id}`; each page's `<h3>{n}. {TEAM}: {headline}` + Source + fact + "Our view"). `--limit N` recent editions (default 7, self-heals a missed day), `--dry-run`. Scheduled via `com.nfldb.laptop-fbg-news` (1:40 PM, no date gate) |
+
 ### Health (`scripts/health/`)
 
 | Script | Purpose |
@@ -405,6 +415,7 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | ESPN ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-espn-adp.plist` | 1:25 PM | venv Python → `fetch_espn_adp.py` (`source=espn`). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/espn_adp.log`. |
 | CBS ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-cbs-adp.plist` | 1:30 PM | venv Python → `fetch_cbs_adp.py` (`source=cbs`). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/cbs_adp.log`. |
 | Yahoo ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-yahoo-adp.plist` | 1:35 PM | venv Python → `fetch_yahoo_adp.py` (`source=yahoo`). Public read-only API, no auth. Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/yahoo_adp.log`. |
+| FBG News (laptop-primary, **year-round**) | `~/Library/LaunchAgents/com.nfldb.laptop-fbg-news.plist` | 1:40 PM | venv Python → `fetch_fbg_news.py --limit 7` (scrape /updates → `news_items`). No date gate. Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/fbg_news.log`. |
 
 **Laptop plists** (`scripts/launchd/laptop/`, `com.nfldb.laptop-*`, venv Python + certifi env vars, installed via `launchctl bootstrap gui/$(id -u)`): midday redundancy copies of the postdraft ADP + health jobs, plus the two **laptop-primary** footballguys.com/adp own-source scrapers (`rtsports`, `nffc`) which have no Desktop counterpart. See `scripts/launchd/laptop/README.md`.
 

@@ -5,12 +5,16 @@ players.player_id (Sportradar UUID) — the same identity NFFC's draft feeds use
 so offense joins on the id directly, which is immune to the name-collision bug
 that muddies FBG's stored NFFC data (e.g. Marquise vs A.J. Brown).
 
-Two sources are published from the same endpoint, differing only by game_type_id:
-  - "nffc_oc"  — the $350 Footballguys Online Championship (game_type_id=936).
-                 The number we display on the /adp page.
-  - "nffc"     — all NFFC contests, un-broken-out (no game_type_id). Matches the
-                 old footballguys.com/adp "NFFC" column. Kept in the DB as a
-                 low-cost hedge / time series; may not be displayed.
+Three sources are published from the same endpoint, differing only by
+game_type_id (all 2026-specific — bump yearly; see build_oc_local_fixture.py):
+  - "nffc_oc"     — the $350 Footballguys Online Championship (game_type_id=936).
+                    The number we display on the /adp page.
+  - "nffc"        — all NFFC contests, un-broken-out (no game_type_id). Matches the
+                    old footballguys.com/adp "NFFC" column. Kept in the DB as a
+                    low-cost hedge / time series; may not be displayed.
+  - "bestball10s" — NFFC BestBall10s (game_type_id=941), the best-ball-tab source.
+                    Replaces the same key FBG's feed carries (confirmed by matching
+                    FBG's `bestball10s` column values).
 
 Position handling (NFFC drafts team K/DST, not individuals):
   - Offense (QB/RB/WR/TE): join on `player` == players.player_id (UUID). A few
@@ -69,8 +73,9 @@ USER_AGENT = "NFFC-Draft-Explorer/1.0"
 # YEARLY (see scripts/nffc/build_oc_local_fixture.py GAME_TYPE_ID_OC) — bump it
 # each season. None = all contests (un-filtered), matching the old "NFFC" column.
 SOURCES = {
-    "nffc_oc": 936,   # displayed: FBG Online Championship
-    "nffc": None,     # hedge: all NFFC contests blended
+    "nffc_oc": 936,       # displayed: FBG Online Championship
+    "nffc": None,         # hedge: all NFFC contests blended
+    "bestball10s": 941,   # NFFC BestBall10s product (best-ball tab; replaces FBG feed)
 }
 
 # macOS system Python often lacks a usable trust store; prefer certifi.

@@ -143,6 +143,7 @@ Scripts are organized by data source.
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
 | `fetch_rtsports_adp.py` | Fetch RTSports public ADP XML feed (`www.rtsports.com/api-adp-xml?TYPE=PPR`) → match by name+position → upsert into adp_sources (`source="rtsports"`). Covers offense + K + team DEF. First of the footballguys.com/adp per-source scrapers (MFL/CBS/ESPN/SHGN next). `--dry-run`, `--type`, `--limit`. Requires kickers + DEF `footballguys_id` to join downstream — see `docs/adp-kicker-defense-join.md`. Use `www` host (valid cert); RTSports requires a live link-back wherever displayed. |
+| `fetch_nffc_adp.py` | Fetch NFFC ADP (`nfc.shgn.com/api/public/adp/football`, `NFFC_API_KEY`) → upsert two sources: `nffc_oc` (`game_type_id=936`, the $350 FBG Online Championship — displayed) and `nffc` (all contests, no game_type_id — the old "NFFC" catch-all, kept as a hedge). NFFC's `player` id **is** `players.player_id` (Sportradar UUID) so offense joins on the id directly (immune to the Marquise/AJ Brown name-swap in FBG's stored data). NFFC drafts **team** K/DST: `TDSP` remaps → `DEF_{TEAM}` by team (converges with other sources); `TK` stays on its own team-kicker row (NFFC int id == `players.player_id`, no `footballguys_id` so it's NFFC-only and excluded from the individual-kicker consensus). `game_type_id=936` is 2026-specific — bump yearly (see `scripts/nffc/build_oc_local_fixture.py`). `--dry-run`, `--source`. Set UA header (403 otherwise). |
 
 ### Games / Schedule (`scripts/games/`)
 
@@ -396,6 +397,10 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | Odds Snapshot | `~/Library/LaunchAgents/com.nfldb.daily-odds.plist` (TODO) | 8:40 AM (planned, Jul 1 – Feb 15) | inline Python → `fetch_odds_snapshot.py` (~3 credits/run on 20K/mo budget) |
 | Sleeper trio (trades + drafts + compute_adp) | `~/Library/LaunchAgents/com.sleeper.daily-scrape.plist` | 8:45 AM | inline Python → `scrape_trades.py --active-only` (7-day window, ~50 min) → `scrape_drafts.py --refresh` (~15 min) → `compute_adp.py` (<1 min). Lives in `~/dev/sleeper-scrape/`. Was 2 PM until May 2026 — moved to 8:45 AM after launchd missed firings. Run `--refresh` (full 15K leagues) manually weekly to catch leagues outside the active window. |
 | Health check | `~/Library/LaunchAgents/com.nfldb.daily-health-check.plist` | 12:00 PM | inline Python → `scripts/health/daily_scrape_health.py`. Queries today's `adp_sources` row counts vs floors per source, greps logs for 401/403/Traceback/ERROR/Unauthorized, fires macOS notification on failure. Always writes `data/logs/health_<date>.txt`. |
+| RTSports ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-rtsports-adp.plist` | 1:15 PM | venv Python → `fetch_rtsports_adp.py` (`source=rtsports`). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/rtsports_adp.log`. |
+| NFFC ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-nffc-adp.plist` | 1:20 PM | venv Python → `fetch_nffc_adp.py` (`source=nffc_oc` + `nffc`). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/nffc_adp.log`. `game_type_id=936` is 2026-specific — bump yearly. |
+
+**Laptop plists** (`scripts/launchd/laptop/`, `com.nfldb.laptop-*`, venv Python + certifi env vars, installed via `launchctl bootstrap gui/$(id -u)`): midday redundancy copies of the postdraft ADP + health jobs, plus the two **laptop-primary** footballguys.com/adp own-source scrapers (`rtsports`, `nffc`) which have no Desktop counterpart. See `scripts/launchd/laptop/README.md`.
 
 Logs: `data/logs/underdog_adp.log`, `data/logs/drafters_adp.log`, `data/logs/draftkings_adp.log`, `data/logs/team_refresh.log`, `data/logs/team_refresh.jsonl`, `data/logs/odds_snapshot.log`, `data/logs/odds_snapshot.jsonl`
 
@@ -1338,6 +1343,8 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `sleeper_1qb` | 2026 | daily (when launchd fires) | startup, 1QB consensus. ~413 players/snapshot. |
 | `sleeper_sf_rookie` | 2026 | daily since Apr 29 | rookie, superflex. Filtered to `players.draft_year = 2026` only (excludes vets that appear in some leagues' rookie drafts). ~74 players/snapshot. |
 | `sleeper_1qb_rookie` | 2026 | daily since Apr 29 | rookie, 1QB. 2026 rookies only. ~57 players/snapshot. |
+| `nffc_oc` | 2026 | daily (once scheduled) | $350 FBG Online Championship (`game_type_id=936`). ~339 rows/snapshot (offense + team K/DST). Joins on `player_id` (NFFC UUID). Displayed on the /adp page. |
+| `nffc` | 2026 | daily (once scheduled) | All NFFC contests, un-broken-out (matches the old footballguys.com/adp "NFFC" column). ~486 rows/snapshot. Kept as a low-cost hedge / time series; may not be displayed. |
 
 ## Supabase Storage
 

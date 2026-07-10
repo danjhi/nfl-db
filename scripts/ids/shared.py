@@ -61,6 +61,8 @@ def normalize_team(team):
     mapping = {
         # Rams: nflreadr=LA, SportsData/others=LAR
         "LAR": "LA", "RAM": "LA", "STL": "LA",
+        # Cardinals: nflreadr=ARI, NFFC/others=ARZ
+        "ARZ": "ARI",
         # Jaguars
         "JAC": "JAX",
         # Commanders

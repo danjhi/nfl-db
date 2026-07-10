@@ -143,6 +143,7 @@ Scripts are organized by data source.
 | `run_daily_draftkings_adp.sh` | Bash wrapper with date-gating (Feb 19 – Apr 22) for launchd scheduling |
 | `export_dynasty_adp_merge.py` | Join today's Underdog ADP with dynasty values → CSV export for spreadsheets |
 | `fetch_rtsports_adp.py` | Fetch RTSports public ADP XML feed (`www.rtsports.com/api-adp-xml?TYPE=PPR`) → match by name+position → upsert into adp_sources (`source="rtsports"`). Covers offense + K + team DEF. First of the footballguys.com/adp per-source scrapers (MFL/CBS/ESPN/SHGN next). `--dry-run`, `--type`, `--limit`. Requires kickers + DEF `footballguys_id` to join downstream — see `docs/adp-kicker-defense-join.md`. Use `www` host (valid cert); RTSports requires a live link-back wherever displayed. |
+| `fetch_nffc_adp.py` | Fetch NFFC ADP (`nfc.shgn.com/api/public/adp/football`, `NFFC_API_KEY`) → upsert two sources: `nffc_oc` (`game_type_id=936`, the $350 FBG Online Championship — displayed) and `nffc` (all contests, no game_type_id — the old "NFFC" catch-all, kept as a hedge). NFFC's `player` id **is** `players.player_id` (Sportradar UUID) so offense joins on the id directly (immune to the Marquise/AJ Brown name-swap in FBG's stored data). NFFC drafts **team** K/DST: `TDSP` remaps → `DEF_{TEAM}` by team (converges with other sources); `TK` stays on its own team-kicker row (NFFC int id == `players.player_id`, no `footballguys_id` so it's NFFC-only and excluded from the individual-kicker consensus). `game_type_id=936` is 2026-specific — bump yearly (see `scripts/nffc/build_oc_local_fixture.py`). `--dry-run`, `--source`. Set UA header (403 otherwise). |
 
 ### Games / Schedule (`scripts/games/`)
 
@@ -1338,6 +1339,8 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `sleeper_1qb` | 2026 | daily (when launchd fires) | startup, 1QB consensus. ~413 players/snapshot. |
 | `sleeper_sf_rookie` | 2026 | daily since Apr 29 | rookie, superflex. Filtered to `players.draft_year = 2026` only (excludes vets that appear in some leagues' rookie drafts). ~74 players/snapshot. |
 | `sleeper_1qb_rookie` | 2026 | daily since Apr 29 | rookie, 1QB. 2026 rookies only. ~57 players/snapshot. |
+| `nffc_oc` | 2026 | daily (once scheduled) | $350 FBG Online Championship (`game_type_id=936`). ~339 rows/snapshot (offense + team K/DST). Joins on `player_id` (NFFC UUID). Displayed on the /adp page. |
+| `nffc` | 2026 | daily (once scheduled) | All NFFC contests, un-broken-out (matches the old footballguys.com/adp "NFFC" column). ~486 rows/snapshot. Kept as a low-cost hedge / time series; may not be displayed. |
 
 ## Supabase Storage
 

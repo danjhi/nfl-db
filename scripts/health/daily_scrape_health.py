@@ -90,6 +90,12 @@ SOURCES = [
         "logs": [os.path.join(LOG_DIR, "cbs_adp.log")],
     },
     {
+        # Yahoo redraft (public read-only fantasy API, no auth).
+        "name": "yahoo", "floor": 150,
+        "active": ("2026-07-10", "2026-09-10"),
+        "logs": [os.path.join(LOG_DIR, "yahoo_adp.log")],
+    },
+    {
         "name": "sleeper_sf", "floor": 400,
         "active": (None, None),  # always-on
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],

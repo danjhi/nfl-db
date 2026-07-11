@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sleeper.daily-scrape</string>
+
+    <!-- LAPTOP redundancy copy of the Desktop's com.sleeper.daily-scrape (08:45).
+         Runs 13:20. daily_trio.py runs trades -> drafts -> ADP, each a subprocess
+         with its own wall-clock cap (sys.executable carries this venv to all three).
+         Idempotent: trades/drafts keyed by id, ADP recomputed from the local db.
+         Supersedes the old com.sleeper.laptop-trade-refresh.plist (trade-only).
+         caffeinate -is holds off idle/system sleep while the run is live —
+         without it a battery run crawls through 8-second dark-wake windows
+         for hours (Jul 3: 2.4h for a trades stage that takes ~7m awake). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-is</string>
+        <string>/Users/danielhindery/dev/sleeper-scrape/.venv/bin/python3</string>
+        <string>-u</string>
+        <string>daily_trio.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/danielhindery/dev/sleeper-scrape</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/danielhindery</string>
+        <key>SSL_CERT_FILE</key>
+        <string>/Users/danielhindery/dev/sleeper-scrape/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+        <key>REQUESTS_CA_BUNDLE</key>
+        <string>/Users/danielhindery/dev/sleeper-scrape/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/danielhindery/dev/sleeper-scrape/logs/daily_scrape.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/danielhindery/dev/sleeper-scrape/logs/daily_scrape.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

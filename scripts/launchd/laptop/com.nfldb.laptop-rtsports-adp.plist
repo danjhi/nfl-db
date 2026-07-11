@@ -32,9 +32,9 @@ print(f"{datetime.datetime.now()}: Done.")
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>13</integer>
+        <integer>10</integer>
         <key>Minute</key>
-        <integer>15</integer>
+        <integer>45</integer>
     </dict>
 
     <key>EnvironmentVariables</key>

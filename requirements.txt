@@ -1,3 +1,11 @@
 supabase>=2.27.0
 pandas>=2.0.0
 requests>=2.31.0
+
+# Added 2026-07-11 while building the DESKTOP venv (scripts/launchd/desktop/).
+# The scheduled scrapers import these directly but they were missing here.
+# Laptop-safe / no-op there: the laptop venv already had both installed ad hoc,
+# so re-running `pip install -r requirements.txt` on the laptop changes nothing.
+# This only completes a fresh venv (e.g. the desktop) so its jobs don't break.
+certifi>=2026.6.17          # SSL cert bundle for urllib under launchd (rtsports, spotlights)
+browser_cookie3>=0.20.1     # reads Chrome cookies for DK/Underdog session setup

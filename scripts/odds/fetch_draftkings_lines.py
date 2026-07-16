@@ -11,20 +11,35 @@ Endpoint (captured from the DK NFL page):
         controldata/league/leagueSubcategory/v1/markets?isBatchable=false
         &templateVars=88808,4
 
-Behind Akamai bot mgmt — plain HTTP fails. Must drive a headless browser so that
+Behind Akamai bot mgmt — plain HTTP fails. Must drive a real browser so that
 the page-level Akamai cookies (`_abck`, `bm_sz`) attach to our XHRs.
 
+2026-07-16 update: DK re-architected the page ("stadium"). The initial ~100
+events are server-rendered + streamed over a msgpack WebSocket, and HEADLESS
+Chromium now gets an empty shell (no odds section, no View More button, no
+XHRs) — headless runs capture 0 events. Headful still works, and clicking
+"View More" re-fetches from page 1 via the same `sportscontent/controldata`
+endpoint (subcategory id is now 4518, was 4), so click-and-capture still
+yields all 272 games. Default is now headful; --headless kept for retesting.
+
 Strategy:
-1. Open the DK NFL page in headless Chromium.
+1. Open the DK NFL page in headful Chromium.
 2. Listen for every `sportscontent/controldata/.../markets` XHR.
-3. Scroll the page aggressively to trigger client-side pagination
-   (DK lazy-loads further weeks as the user scrolls).
+3. Click the "View More" button until it disappears (100 events/page;
+   the first click re-fetches page 1, so nothing is missed).
 4. Parse the captured JSON: each response has events + markets + selections.
 5. Match each event to our `games.game_id` by (date_ET, home_abbr, away_abbr).
 6. Upsert into `game_odds_snapshots` with bookmaker='draftkings'.
 
+Partial boards are EXPECTED, not an error (policy 2026-07-16): in-season DK
+trims the board to upcoming weeks. We upsert whatever is posted; games absent
+from today's board keep their most recent prior snapshot (PK includes date, so
+history is never overwritten) and every consumer reads latest-available per
+game — worst case that's the original 2026-05-15 openers. Only a zero-event
+capture is treated as failure.
+
 Usage:
-    python3 scripts/odds/fetch_draftkings_lines.py [--dry-run]
+    python3 scripts/odds/fetch_draftkings_lines.py [--dry-run] [--headless]
 """
 from __future__ import annotations
 
@@ -46,7 +61,12 @@ from shared import (  # noqa: E402
 )
 
 ET = ZoneInfo("America/New_York")
-DK_NFL_URL = "https://sportsbook.draftkings.com/leagues/football/nfl"
+# Query params matter since the 2026-07 redesign: the bare league URL no longer
+# defaults to the game-lines board (no View More button → 0 events captured).
+DK_NFL_URL = (
+    "https://sportsbook.draftkings.com/leagues/football/nfl"
+    "?category=games&subcategory=game-lines&nav_1=all"
+)
 BOOKMAKER = "draftkings"
 
 # DK uses the Unicode minus sign − in displayOdds.american
@@ -84,8 +104,12 @@ def setup_logging():
     return logging.getLogger("dk-lines")
 
 
-def scrape_dk_payloads(log) -> list[dict]:
-    """Drive a headless browser, scroll DK's NFL page, return all captured payloads."""
+def scrape_dk_payloads(log, headless: bool = False) -> list[dict]:
+    """Drive a browser, paginate DK's NFL page, return all captured payloads.
+
+    Headful by default since 2026-07: DK serves an empty shell to headless
+    Chromium (see module docstring).
+    """
     from playwright.sync_api import sync_playwright
 
     payloads: list[dict] = []
@@ -113,22 +137,36 @@ def scrape_dk_payloads(log) -> list[dict]:
             log.info(f"  XHR captured: +{len(new)} new events (total {len(seen_event_ids)})")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            viewport={"width": 1400, "height": 900},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        )
+        browser = p.chromium.launch(headless=headless)
+        # Headful: keep Chromium's own UA + client hints consistent (a spoofed
+        # UA string mismatches Sec-CH-UA and looks more suspicious to Akamai).
+        ctx_kwargs = {"viewport": {"width": 1400, "height": 900}}
+        if headless:
+            ctx_kwargs["user_agent"] = (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            )
+        ctx = browser.new_context(**ctx_kwargs)
         page = ctx.new_page()
         page.on("response", on_response)
 
         log.info("Loading DK NFL page...")
         page.goto(DK_NFL_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)
 
-        # DK paginates 100 events per page. The "View More" button
-        # (class: cms-market-selector-load-more-button) triggers the next page.
-        # Click until it disappears.
-        for round_i in range(20):
+        # The odds section hydrates late (SSR shell + WebSocket). Wait for the
+        # "View More" button before clicking — without it we capture nothing,
+        # since page 1 is only fetched via XHR when the button is clicked.
+        try:
+            page.wait_for_selector(".cms-market-selector-load-more-button", timeout=30000)
+        except Exception:
+            log.warning("  View More button never appeared (empty shell? headless?)")
+        page.wait_for_timeout(2000)
+
+        # DK paginates 100 events per page. Click "View More" until it's gone
+        # for good (it can be briefly absent while a page loads, so require a
+        # few consecutive misses before giving up).
+        misses = 0
+        for round_i in range(30):
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(500)
             clicked = page.evaluate("""() => {
@@ -139,8 +177,13 @@ def scrape_dk_payloads(log) -> list[dict]:
                 return true;
             }""")
             if not clicked:
-                log.info(f"  no more View More button — captured {len(seen_event_ids)} events total")
-                break
+                misses += 1
+                if misses >= 3:
+                    log.info(f"  no more View More button — captured {len(seen_event_ids)} events total")
+                    break
+                page.wait_for_timeout(2000)
+                continue
+            misses = 0
             page.wait_for_timeout(2500)
             log.info(f"  clicked View More (round {round_i+1}): {len(seen_event_ids)} events so far")
         page.wait_for_timeout(1000)
@@ -340,13 +383,17 @@ def batch_upsert(rows: list[dict], log) -> tuple[int, int]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run headless (captures 0 events as of 2026-07 — DK serves an empty shell; kept for retesting)",
+    )
     args = parser.parse_args()
 
     log = setup_logging()
     today = datetime.date.today().isoformat()
     log.info(f"=== DraftKings lines scrape {today} ===")
 
-    payloads = scrape_dk_payloads(log)
+    payloads = scrape_dk_payloads(log, headless=args.headless)
     log.info(f"Captured {len(payloads)} payloads across {sum(len(p.get('events',[])) for p in payloads)} raw event entries")
     if not payloads:
         log.error("No payloads captured. Akamai blocked us or DK changed paths.")
@@ -380,6 +427,14 @@ def main():
     log.info(f"Matched: {len(rows)}  Unmatched: {len(unmatched)}")
     for u in unmatched[:10]:
         log.warning(u)
+
+    # Partial coverage is normal (in-season DK only posts upcoming weeks).
+    # Games absent from today's board keep their most recent prior snapshot.
+    covered = {r["game_id"] for r in rows}
+    log.info(
+        f"Board coverage: {len(covered)}/{len(games)} games in `games`; "
+        f"absent games keep their latest prior snapshot (by design)"
+    )
 
     if args.dry_run:
         log.info(f"[dry-run] sample row: {rows[0] if rows else 'none'}")

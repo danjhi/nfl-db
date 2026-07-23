@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 _script_dir = os.path.dirname(os.path.abspath(__file__)) if os.path.exists(__file__) else os.path.join("scripts", "health")
@@ -137,6 +138,14 @@ def is_active(active_window):
     return True
 
 
+class NetworkDown(Exception):
+    """Supabase is unreachable at the network level (no DNS, no route,
+    connection refused). Distinct from a failed query: on 2026-07-20/21 the
+    laptop was offline at check time and every source got reported as
+    "Supabase query failed" when the real story was "no internet — and the
+    scrapes before this check almost certainly didn't run either"."""
+
+
 def _get(url, extra_headers=None):
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     if extra_headers:
@@ -145,31 +154,58 @@ def _get(url, extra_headers=None):
     return urllib.request.urlopen(req, timeout=15)
 
 
+def _latest_snapshot_date(source):
+    """(date, year) of the most recent snapshot for `source`, or (None, year)
+    if the source has no rows. Equality on (source, year) + ORDER BY date
+    keeps the probe on idx_adp_sources_source_year_date no matter how big
+    adp_sources gets — the old ORDER BY retrieved_at had no index behind it
+    and started brushing the statement timeout at ~300k rows (2026-07-23).
+    Rows are keyed on season year; around the winter turnover the newest
+    snapshot may still carry last season's year, so fall back one year."""
+    import json
+
+    this_year = datetime.date.today().year
+    for year in (this_year, this_year - 1):
+        url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
+               f"?select=date&source=eq.{source}&year=eq.{year}"
+               f"&order=date.desc&limit=1")
+        rows = json.loads(_get(url).read().decode("utf-8"))
+        if rows:
+            return (rows[0]["date"], year)
+    return (None, this_year)
+
+
 def latest_snapshot(source):
     """Return (snapshot_date, age_hours, row_count) for the source's most
     recent snapshot in adp_sources, or None on query failure. A source with
-    no rows at all returns (None, None, 0).
+    no rows at all returns (None, None, 0). Raises NetworkDown when Supabase
+    can't be reached at all.
     """
     import json
 
     try:
-        url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
-               f"?select=date,retrieved_at&source=eq.{source}"
-               f"&order=retrieved_at.desc&limit=1")
-        rows = json.loads(_get(url).read().decode("utf-8"))
-        if not rows:
+        snap_date, year = _latest_snapshot_date(source)
+        if snap_date is None:
             return (None, None, 0)
-        snap_date = rows[0]["date"]
+
+        url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
+               f"?select=retrieved_at&source=eq.{source}&year=eq.{year}"
+               f"&date=eq.{snap_date}&order=retrieved_at.desc&limit=1")
+        rows = json.loads(_get(url).read().decode("utf-8"))
         retrieved = datetime.datetime.fromisoformat(rows[0]["retrieved_at"])
         now = datetime.datetime.now(datetime.timezone.utc)
         age_hours = (now - retrieved).total_seconds() / 3600
 
         url = (f"{SUPABASE_URL}/rest/v1/adp_sources"
-               f"?select=count&source=eq.{source}&date=eq.{snap_date}")
+               f"?select=count&source=eq.{source}&year=eq.{year}&date=eq.{snap_date}")
         resp = _get(url, {"Prefer": "count=exact"})
         cr = resp.headers.get("content-range", "")
         count = int(cr.split("/")[-1]) if cr else 0
         return (snap_date, age_hours, count)
+    except urllib.error.HTTPError:
+        return None  # server responded with an error — a query failure
+    except urllib.error.URLError as e:
+        raise NetworkDown(getattr(e, "reason", e)) from e
     except Exception:
         return None  # treat as failure
 
@@ -263,6 +299,7 @@ def main():
 
     failures = []  # list of (source, reason) tuples
     skipped = []   # sources not in active window
+    offline = None  # NetworkDown message when Supabase is unreachable
     summary_lines = [f"=== Daily scrape health check — {TODAY} ==="]
 
     for src in SOURCES:
@@ -271,7 +308,14 @@ def main():
             summary_lines.append(f"  SKIP   {src['name']:25s} (outside active window)")
             continue
 
-        snap = latest_snapshot(src["name"])
+        try:
+            snap = latest_snapshot(src["name"])
+        except NetworkDown as e:
+            offline = str(e)
+            summary_lines.append(f"  OFFLINE — Supabase unreachable ({offline}). Aborting source checks.")
+            summary_lines.append("  The scheduled scrapes before this check almost certainly didn't run")
+            summary_lines.append("  either — verify today's row counts once back online.")
+            break
         if snap is None:
             failures.append((src["name"], "Supabase query failed"))
             summary_lines.append(f"  ERROR  {src['name']:25s} Supabase query failed")
@@ -319,7 +363,19 @@ def main():
     print(f"\nReport written to {report_path}")
 
     # Notify
-    if failures:
+    if offline is not None:
+        title = "[NFL DB] Health check OFFLINE — Supabase unreachable"
+        # osascript is local, so the banner still fires with no internet;
+        # the email send will fail quietly and that's fine.
+        send_notification(
+            "NFL DB health check OFFLINE",
+            "No internet at check time — scrapes probably didn't run. Verify row counts once back online.",
+            sound=True,
+        )
+        send_email(title, summary + f"\n\nReport: {report_path}\n")
+        print(f"\nNotification sent: {title}")
+        sys.exit(1)
+    elif failures:
         failed_names = ", ".join(name for name, _ in failures)
         title = f"[NFL DB] Scrape FAIL ({len(failures)}): {failed_names}"
         body_lines = [f"{name}: {reason}" for name, reason in failures[:3]]

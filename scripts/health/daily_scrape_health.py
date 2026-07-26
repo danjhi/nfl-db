@@ -1,14 +1,24 @@
 """Daily health check for the ADP scrape pipeline.
 
-Runs at 14:00. For each expected ADP source, checks that the most recent
-snapshot in Supabase is FRESH (retrieved within MAX_AGE_HOURS) and has at
-least `floor` rows. Freshness-based rather than "rows dated today" so a
-scrape that pushes after this check runs (the laptop trio can finish
-mid-afternoon) doesn't raise a false alarm — a genuinely missed day shows
-up as a ~46h-old snapshot at the next check.
-Also greps recent log files for auth errors and tracebacks. If anything's
-off, fires a macOS notification (banner + sound).
+Runs via launchd at 11:25 (laptop) / 12:00 (desktop); both machines send
+the same email, so the machine name is in the subject and report header.
+For each expected ADP source, checks that the most recent snapshot in
+Supabase is FRESH (retrieved within MAX_AGE_HOURS) and has at least
+`floor` rows. Freshness-based rather than "rows dated today" so a scrape
+that pushes after this check runs doesn't raise a false alarm — a
+genuinely missed day shows up as a ~46h-old snapshot at the next check.
 
+Also greps recent log files for auth errors and tracebacks, and classifies
+two situations distinctly instead of leaving them as generic FAILs:
+  - AUTH: the source is stale AND its log shows an auth-expiry signature
+    (DK 401 "Session has expired", Underdog Cloudflare 403, Drafters JWT).
+    These need Dan (a logged-in-Chrome setup run); the report says exactly
+    what to run.
+  - just-woke: the machine came out of sleep right before this check
+    (launchd fires missed jobs on wake), so staleness may be wake lag,
+    not breakage — the 2026-07-22 vacation FAIL(11) email was this.
+
+If anything's off, fires a macOS notification (banner + sound).
 Always writes a daily report to data/logs/health_<date>.txt.
 
 Usage:
@@ -31,6 +41,12 @@ from shared import SUPABASE_URL, SUPABASE_KEY, ROOT_DIR  # noqa: E402
 LOG_DIR = os.path.join(ROOT_DIR, "data", "logs")
 SLEEPER_LOG_DIR = os.path.join(os.path.expanduser("~"), "dev", "sleeper-scrape", "logs")
 TODAY = datetime.date.today().isoformat()
+
+# Both machines run this check and send identically-shaped emails; label
+# them (the 07-22 vacation FAIL(11) email was untraceable to a machine).
+MACHINE = {"/Users/danielhindery": "laptop", "/Users/dan": "desktop"}.get(
+    os.path.expanduser("~"), os.uname().nodename.split(".")[0]
+)
 
 # A snapshot older than this is considered stale. Daily pushes land between
 # ~09:00 (desktop) and ~15:50 (laptop trio worst case: 13:20 start + stage
@@ -127,6 +143,32 @@ ERROR_PATTERNS = [
     re.compile(r"Unauthorized", re.IGNORECASE),
     re.compile(r"session.*expired", re.IGNORECASE),
 ]
+
+# A stale source whose log matches one of these is an expired login, not a
+# broken scrape — a distinct failure class because only Dan can fix it
+# (the setup scripts read his logged-in Chrome session).
+AUTH_RE = re.compile(r"session.*expired|re-run setup|cloudflare 403|\b401\b", re.IGNORECASE)
+AUTH_ACTIONS = {
+    "draftkings": "python3 scripts/adp/setup_dk_session.py (Chrome closed, logged in to DK)",
+    "underdog": "python3 scripts/adp/setup_underdog_session.py (Chrome logged in to Underdog)",
+    "drafters": "refresh DRAFTERS_JWT in .env",
+}
+
+
+def minutes_since_wake():
+    """Minutes since the system last woke from sleep, or None if unknown.
+    `sysctl kern.waketime` is the epoch time of the last wake on macOS."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "kern.waketime"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        m = re.search(r"sec\s*=\s*(\d+)", out)
+        if not m:
+            return None
+        return (datetime.datetime.now().timestamp() - int(m.group(1))) / 60
+    except Exception:
+        return None
 
 
 def is_active(active_window):
@@ -298,9 +340,23 @@ def main():
     force = "--force" in sys.argv
 
     failures = []  # list of (source, reason) tuples
+    auth_failures = []  # subset of failures that are expired-login (Dan-only fix)
     skipped = []   # sources not in active window
     offline = None  # NetworkDown message when Supabase is unreachable
-    summary_lines = [f"=== Daily scrape health check — {TODAY} ==="]
+    summary_lines = [f"=== Daily scrape health check [{MACHINE}] — {TODAY} ==="]
+
+    wake_min = minutes_since_wake()
+    just_woke = wake_min is not None and wake_min < 30
+    if just_woke:
+        summary_lines.append(
+            f"  NOTE: {MACHINE} woke from sleep {wake_min:.0f} min before this check."
+        )
+        summary_lines.append(
+            "  launchd fires missed jobs on wake, so today's scrapes may still be catching"
+        )
+        summary_lines.append(
+            "  up — staleness below can be wake lag, not breakage. Re-check once settled."
+        )
 
     for src in SOURCES:
         if not is_active(src["active"]):
@@ -331,26 +387,30 @@ def main():
             if n < src["floor"]:
                 reasons.append(f"{n} rows < floor {src['floor']}")
 
-        status = "FAIL" if reasons else "OK"
+        # Scan associated logs for errors (today's portion only)
+        src_hits = []
+        for log_path in src["logs"]:
+            for hit in scan_log_for_errors(log_path):
+                src_hits.append((os.path.basename(log_path), hit))
+
+        # A stale source with an auth signature in today's log is an expired
+        # login — label it AUTH and say exactly what Dan needs to run.
+        auth = bool(reasons) and any(AUTH_RE.search(hit) for _, hit in src_hits)
+        status = "AUTH" if auth else ("FAIL" if reasons else "OK")
         detail = (f"{n:>5} rows @ {snap_date} ({age_hours:.1f}h ago, floor {src['floor']})"
                   if snap_date else "no rows")
         summary_lines.append(f"  {status:6s} {src['name']:25s} {detail}")
+        if auth:
+            action = AUTH_ACTIONS.get(
+                src["name"].split("_")[0], "re-run this source's session setup"
+            )
+            summary_lines.append(f"    AUTH EXPIRED — needs Dan: {action}")
+        for base, hit in src_hits:
+            summary_lines.append(f"    log[{base}]: {hit[:120]}")
         if reasons:
-            failures.append((src["name"], "; ".join(reasons)))
-
-        # Scan associated logs for errors
-        for log_path in src["logs"]:
-            err_hits = scan_log_for_errors(log_path)
-            for hit in err_hits:
-                summary_lines.append(f"    log[{os.path.basename(log_path)}]: {hit[:120]}")
-
-    # Cross-source error scan (catches stuff not tied to a specific source)
-    for log_path in {p for s in SOURCES for p in s["logs"] if is_active(s["active"])}:
-        err_hits = scan_log_for_errors(log_path)
-        for hit in err_hits:
-            line = f"  log-error[{os.path.basename(log_path)}]: {hit[:160]}"
-            if line not in summary_lines:  # de-dupe with above
-                pass  # already in per-source section
+            failures.append((src["name"], ("AUTH expired; " if auth else "") + "; ".join(reasons)))
+            if auth:
+                auth_failures.append(src["name"])
 
     # Write daily report
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -364,11 +424,11 @@ def main():
 
     # Notify
     if offline is not None:
-        title = "[NFL DB] Health check OFFLINE — Supabase unreachable"
+        title = f"[NFL DB {MACHINE}] Health check OFFLINE — Supabase unreachable"
         # osascript is local, so the banner still fires with no internet;
         # the email send will fail quietly and that's fine.
         send_notification(
-            "NFL DB health check OFFLINE",
+            f"NFL DB {MACHINE} health check OFFLINE",
             "No internet at check time — scrapes probably didn't run. Verify row counts once back online.",
             sound=True,
         )
@@ -377,19 +437,22 @@ def main():
         sys.exit(1)
     elif failures:
         failed_names = ", ".join(name for name, _ in failures)
-        title = f"[NFL DB] Scrape FAIL ({len(failures)}): {failed_names}"
+        woke_tag = ", just-woke" if just_woke else ""
+        title = f"[NFL DB {MACHINE}] Scrape FAIL ({len(failures)}{woke_tag}): {failed_names}"
+        if auth_failures:
+            title += f" | AUTH needs Dan: {', '.join(auth_failures)}"
         body_lines = [f"{name}: {reason}" for name, reason in failures[:3]]
         if len(failures) > 3:
             body_lines.append(f"…and {len(failures) - 3} more")
         short_body = " | ".join(body_lines)
-        send_notification(f"NFL DB scrape FAIL ({len(failures)})", short_body, sound=True)
+        send_notification(f"NFL DB {MACHINE} scrape FAIL ({len(failures)})", short_body, sound=True)
         send_email(title, summary + f"\n\nReport: {report_path}\n")
         print(f"\nNotification sent: {title}")
         sys.exit(1)
     elif force:
         active_count = len([s for s in SOURCES if is_active(s['active'])])
-        send_notification("NFL DB scrape OK", f"All {active_count} sources OK", sound=False)
-        send_email(f"[NFL DB] Scrape OK ({active_count} sources)", summary + "\n")
+        send_notification(f"NFL DB {MACHINE} scrape OK", f"All {active_count} sources OK", sound=False)
+        send_email(f"[NFL DB {MACHINE}] Scrape OK ({active_count} sources)", summary + "\n")
         print("\n[--force] Notification sent (success)")
     else:
         print("\nAll sources OK — no notification sent.")

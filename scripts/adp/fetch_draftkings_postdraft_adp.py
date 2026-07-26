@@ -46,8 +46,10 @@ def fetch_dk_players():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("ERROR: playwright not installed.")
-        print("  Run: pip install playwright && python3 -m playwright install chromium")
+        # Name the interpreter (see the underdog fetcher: the bare message
+        # hid a desktop system-python vs venv drift for weeks).
+        print(f"ERROR: playwright not importable in {sys.executable}")
+        print(f"  Run: {sys.executable} -m pip install playwright && {sys.executable} -m playwright install chromium")
         sys.exit(1)
 
     if not os.path.exists(SESSION_FILE):
@@ -63,7 +65,21 @@ def fetch_dk_players():
         context = browser.new_context(storage_state=SESSION_FILE)
         page = context.new_page()
         print(f"  Fetching DK post-draft playerpool API (draftgroup 146136)…")
-        resp = page.goto(DK_API_URL, wait_until="load", timeout=30000)
+        try:
+            resp = page.goto(DK_API_URL, wait_until="load", timeout=30000)
+        except Exception as e:
+            # A dead network used to dump a 40-line playwright traceback here
+            # (net::ERR_INTERNET_DISCONNECTED, 07-24/25) that health-check
+            # greps surfaced as if the scrape itself broke.
+            print(f"ERROR: could not reach DK API: {str(e).splitlines()[0][:160]}")
+            try:
+                import socket
+                socket.getaddrinfo("api.draftkings.com", 443)
+            except OSError:
+                print("  Network appears DOWN (DNS failed) — not a session problem; will self-recover next run")
+            context.close()
+            browser.close()
+            sys.exit(1)
 
         if resp is None or resp.status != 200:
             status = resp.status if resp else "no response"

@@ -35,7 +35,8 @@ The vault is the historical record and design rationale. CLAUDE.md is operationa
 - **Project ref:** `twfzcrodldvhpfaykasj`
 - **URL:** `https://twfzcrodldvhpfaykasj.supabase.co`
 - **Auth:** `.env` contains `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ACCESS_TOKEN` (PAT), `NFFC_API_KEY`, `SPORTSDATA_API_KEY`, `FBG_API_KEY`, `SUPABASE_DB_PASSWORD`
-- **Direct Postgres:** `db.twfzcrodldvhpfaykasj.supabase.co:5432` — use for DDL migrations when MCP is unavailable
+- **Direct Postgres:** `db.twfzcrodldvhpfaykasj.supabase.co:5432` — use for DDL migrations when MCP is unavailable. That hostname is IPv6-only; on IPv4-only networks use the session pooler instead: `aws-0-us-west-2.pooler.supabase.com:5432`, user `postgres.twfzcrodldvhpfaykasj`
+- **Statement timeouts:** `anon` raised 3s → 8s on 2026-07-23 (`ALTER ROLE anon SET statement_timeout = '8s'` + `NOTIFY pgrst, 'reload config'`) after `adp_sources` growth (~300k rows) pushed consumer queries past 3s — broke adp-movers, the daily health check, and fbg-adp-demo's fixture build. `authenticated`/`authenticator` were already 8s. Consumers should still prefer indexed probe-then-slice query shapes over big ORDER BY + OFFSET scans
 
 ## External APIs
 
@@ -192,7 +193,7 @@ FBG "News and Notes" pipeline → `news_items` (status='draft' for review). Item
 
 | Script | Purpose |
 |--------|---------|
-| `daily_scrape_health.py` | Daily check at noon (via launchd `com.nfldb.daily-health-check`). For each ADP source, queries today's row count vs floor + scans related log files for auth/traceback patterns. Sends macOS notification (osascript) on any failure. Writes daily report to `data/logs/health_<date>.txt`. Use `--force` to send a notification even on success (testing). |
+| `daily_scrape_health.py` | Daily check (laptop 11:25 via `com.nfldb.laptop-health-check`, desktop 12:00 via `com.nfldb.daily-health-check`). Per ADP source: latest-snapshot freshness (28h max) + row count vs floor (indexed probe-then-slice queries), plus log scans for auth/traceback patterns. Since 2026-07-26: email subject carries the machine (`[NFL DB laptop] …`), a stale source with an auth signature in its log is classified `AUTH` with the exact setup command Dan must run, and a check firing within 30 min of a wake gets a `just-woke` banner/tag (staleness may be wake lag — the 07-22 vacation FAIL(11) pattern). Sends macOS notification + Gmail on failure. Writes `data/logs/health_<date>.txt`. `--force` notifies on success (testing). |
 
 ### Enrichment (`scripts/ids/`)
 
@@ -222,7 +223,9 @@ Complete ETL pipeline for FBG Bowl historical data. Both 2024 and 2025 fully loa
 | `04_compute_fbg_scores.py` | Compute FBG Bowl meta-scores (wins + league bonus + semi/finals + top-10 bonuses) → `fbg_bowl_scores` |
 | `05_validate.py` | Validate DB against local CSVs and Google Sheets. Checks row counts, week-14 standings, playoff sheet |
 | `06_backfill_playoff_advancement.py` | Build `data/fbg_bowl/advancement_{year}.csv` (who made semis/finals + final rank) from Dan's published sheets/R exports; `--write-db` PATCHes `fbg_bowl_playoff_results.final_rank`. Required input for `04`. |
-| `schema.sql` | DDL for all 7 tables. Applied via pg8000 (Management API blocked) |
+| `07_fetch_user_activity.py` | Pull every Bowl participant's Sleeper league counts + format mix for 2023–2026 → `fbg_bowl_user_activity`. Sleeper `user/{id}/leagues/nfl/{season}` for all distinct `fbg_bowl_rosters.sleeper_user_id` (~5,756 users × 4 seasons = 23,024 calls, ~2.5 min, no auth, concurrency 10). Classifies each league Bowl/other-FBG/outside + format flags off `settings`. **Re-running appends a new `snapshot_date`** (adp_sources pattern) so 2026 in-season growth is a time series. `--dry-run`, `--seasons`. Raw cached to `data/fbg_bowl/user_activity_raw.json`. |
+| `schema.sql` | DDL for all 7 core tables. Applied via pg8000 (Management API blocked) |
+| `schema_user_activity.sql` | DDL for `fbg_bowl_user_activity` (+ RLS public SELECT + 3 indexes). Applied via psql. |
 
 **Scoring formula**: 1pt/win + 35 (1st in league) or 10 (2nd) + 35 (reached semifinal round, week 16) + 35 (reached finals round, week 17) + top-10 bonus (300/200/150/125/100/85/70/55/45/35)
 
@@ -1308,6 +1311,7 @@ Applied via direct SQL (not tracked in migration system, pre-existing):
 | `fbg_bowl_playoff_results` | 6,645 (4,371 for 2025, 2,274 for 2024) |
 | `fbg_bowl_draft_picks` | 138,000 (100,080 for 2025, 37,920 for 2024) |
 | `fbg_bowl_scores` | 6,900 (5,004 for 2025, 1,896 for 2024) |
+| `fbg_bowl_user_activity` | 23,024 (5,756 users × 4 seasons 2023–2026; snapshot 2026-07-17) |
 | `games` | 272 (2026 regular season; post fills in late Dec) |
 | `game_odds_snapshots` | 525 (day 1: 253 Odds API rows across 75 games × 10 books + 272 DraftKings rows covering full season) — grows daily |
 | `sleeper_leagues` | 12,629 (2026 dynasty leagues) |

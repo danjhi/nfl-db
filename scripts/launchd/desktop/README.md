@@ -1,5 +1,26 @@
 # Desktop-primary scrape schedule
 
+## Recovery checklist (state as of 2026-07-26)
+
+The desktop's INSTALLED jobs are still the previous generation (old
+`/Users/dan` plists, health check at 12:00; see the vault note "Daily
+Scrape Jobs - launchd Backup") — this directory's schedule was never
+installed there. Its underdog fetch has logged "playwright not
+installed" for weeks (interpreter without the package); the laptop's
+10:00 pass covered the data daily, so only the desktop's own log/email
+noise gave it away. When the desktop is next awake:
+
+1. `cd ~/dev/nfl-db && git pull` — machine-labeled health emails, AUTH
+   classification, self-diagnosing fetcher errors, hardened installer.
+2. `.venv/bin/python3 -c "import playwright"` — if it fails:
+   `.venv/bin/python3 -m pip install playwright && .venv/bin/python3 -m playwright install chromium`
+3. `cd ~/dev/sleeper-scrape && git pull` — concurrent trades refresh,
+   adp preflight, push self-heal.
+4. `bash scripts/launchd/desktop/install.sh` — preflight now refuses to
+   install over a venv missing playwright/httpx.
+5. If the first DK run 401s, its `data/dk_session.json` is on its own
+   expiry clock: re-run `setup_dk_session.py` on that machine.
+
 The desktop owns every daily scrape, early morning. The laptop runs the
 same jobs later in the morning as redundancy (see `../laptop/`), and the
 ADP site rebuild fires from the laptop at 11:45 after FBG's 11:30 ET feed

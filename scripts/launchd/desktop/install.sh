@@ -22,6 +22,17 @@ LA="$HOME/Library/LaunchAgents"
 echo "== preflight =="
 [ -d "$HOME/dev/nfl-db/.venv" ] || { echo "FATAL: ~/dev/nfl-db/.venv missing"; exit 1; }
 [ -d "$HOME/dev/sleeper-scrape" ] || { echo "FATAL: ~/dev/sleeper-scrape missing"; exit 1; }
+# A venv that exists but lacks playwright produced weeks of daily
+# "playwright not installed" underdog/DK failures on the desktop —
+# refuse to install a schedule that is guaranteed to fail.
+"$HOME/dev/nfl-db/.venv/bin/python3" -c "import playwright" 2>/dev/null \
+  || { echo "FATAL: playwright not importable in nfl-db/.venv (underdog + DK fetches would fail)."; \
+       echo "  Fix: ~/dev/nfl-db/.venv/bin/python3 -m pip install playwright && ~/dev/nfl-db/.venv/bin/python3 -m playwright install chromium"; \
+       exit 1; }
+[ -x "$HOME/dev/sleeper-scrape/.venv/bin/python3" ] \
+  || { echo "FATAL: ~/dev/sleeper-scrape/.venv missing (sleeper trio needs it)"; exit 1; }
+"$HOME/dev/sleeper-scrape/.venv/bin/python3" -c "import httpx" 2>/dev/null \
+  || { echo "FATAL: httpx not importable in sleeper-scrape/.venv"; exit 1; }
 grep -q '^SUPABASE_SERVICE_ROLE_KEY=' "$HOME/dev/nfl-db/.env" \
   || echo "WARN: SUPABASE_SERVICE_ROLE_KEY missing from nfl-db/.env (news + spotlights need it)"
 

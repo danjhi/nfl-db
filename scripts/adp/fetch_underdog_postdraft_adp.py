@@ -68,8 +68,10 @@ def fetch_underdog_csv():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("ERROR: playwright not installed.")
-        print("  Run: pip install playwright && python3 -m playwright install chromium")
+        # Name the interpreter: this fired for weeks on the desktop and the
+        # bare message gave no clue WHICH python was missing the package.
+        print(f"ERROR: playwright not importable in {sys.executable}")
+        print(f"  Run: {sys.executable} -m pip install playwright && {sys.executable} -m playwright install chromium")
         sys.exit(1)
 
     if not os.path.exists(SESSION_FILE):
@@ -106,7 +108,16 @@ def fetch_underdog_csv():
                 text = f.read()
         except Exception as e:
             print(f"ERROR: download failed: {type(e).__name__}: {str(e)[:200]}")
-            print("  Likely Cloudflare 403 — re-run setup_underdog_session.py")
+            # Don't blame Cloudflare when the machine is simply offline
+            # (07-24/25 vacation days logged the 403 hint with no network,
+            # which mis-steered the health emails toward a session problem).
+            try:
+                import socket
+                socket.getaddrinfo("app.underdogsports.com", 443)
+            except OSError:
+                print("  Network appears DOWN (DNS failed) — not a session problem; will self-recover next run")
+            else:
+                print("  Likely Cloudflare 403 — re-run setup_underdog_session.py")
             ctx.close()
             browser.close()
             sys.exit(1)

@@ -183,7 +183,7 @@ def main():
                     ud_row = ud_by_pid[cand]
                     id_hits += 1
                     break
-        else:
+        if ud_row is None:
             ud_row = ud_by_name.get((norm(row["Name"]), row["Position"]))
             if ud_row:
                 name_hits += 1

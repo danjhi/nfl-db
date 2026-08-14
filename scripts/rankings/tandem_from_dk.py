@@ -162,74 +162,111 @@ def main():
         print(f"Overrides: {args.overrides}")
 
     report = []
+    xwalk = fetch_crosswalk()
 
-    # ── Drafters: DK format, reordered ───────────────────────────────────
-    drafters_order = apply_overrides(
+    def reorder_template(fields, rows, site, out_name):
+        """Reorder a site's own rankings template (UD and Drafters share the
+        same UUID id/playerId schema) into master-plus-overrides order:
+        matched players first, everything else tail-appended untouched."""
+        by_pid = {r["playerId"]: r for r in rows}
+        by_name = {}
+        for r in rows:
+            pos = (r.get("slotName") or "").strip()
+            for k in name_keys(f"{r['firstName']} {r['lastName']}"):
+                by_name.setdefault((k, pos), r)
+
+        site_master = apply_overrides(
+            apply_overrides(list(master), overrides["all"], f"all/{site}", report),
+            overrides[site], site, report)
+
+        ranked, seen, unmatched = [], set(), []
+        id_hits = name_hits = 0
+        for row in site_master:
+            hit = None
+            p = xwalk.get(row["ID"])
+            # underdog_postdraft_id is the UD file's playerId for most players;
+            # player_id doubles as the site UUID only for newer inserts.
+            if p:
+                for cand in (p.get("underdog_postdraft_id"), p.get("player_id")):
+                    if cand and cand in by_pid:
+                        hit = by_pid[cand]
+                        id_hits += 1
+                        break
+            if hit is None:
+                for k in name_keys(row["Name"]):
+                    hit = by_name.get((k, row["Position"]))
+                    if hit:
+                        name_hits += 1
+                        break
+            if hit and hit["playerId"] not in seen:
+                seen.add(hit["playerId"])
+                ranked.append(hit)
+            elif not hit:
+                unmatched.append(f"{row['Name']} ({row['Position']})")
+
+        tail = [r for r in rows if r["playerId"] not in seen]
+        out = os.path.join(DOWNLOADS, out_name)
+        with open(out, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields, quoting=csv.QUOTE_ALL)
+            w.writeheader()
+            w.writerows(ranked + tail)
+
+        print(f"\n{site.capitalize()}: wrote {len(ranked)} ranked + {len(tail)} tail rows -> {out}")
+        print(f"  matched via crosswalk: {id_hits} · via name+pos: {name_hits} · unmatched: {len(unmatched)}")
+        if unmatched:
+            print(f"  UNMATCHED (in DK top list, absent from the {site} file — check pool/name):")
+            for u in unmatched[:15]:
+                print(f"    - {u}")
+
+    reorder_template(ud_fields, ud_rows, "underdog", f"UnderdogRankings_from_DK_{TODAY}.csv")
+
+    # ── Drafters: their own format (id,position,name,preferred,team abbr,ADP,AVG
+    # with Drafters numeric ids). Their download round-trips through their
+    # importer as-is, so the transform preserves every original line verbatim
+    # and reorders lines only. Template = Dan's freshest player-list download
+    # (no automated fetch persists this one yet).
+    dr_path = newest(os.path.join(DOWNLOADS, "drafters_players*.csv"), "Drafters player list")
+    print(f"\nDrafters template: {os.path.basename(dr_path)}  "
+          f"(modified {datetime.date.fromtimestamp(os.path.getmtime(dr_path))})")
+    with open(dr_path, newline="", encoding="utf-8") as f:
+        raw = f.readlines()
+    header, data_lines = raw[0], raw[1:]
+    parsed = list(csv.DictReader([header.lstrip("﻿")] + data_lines))
+
+    dr_by_name = {}
+    for line, r in zip(data_lines, parsed):
+        pos = (r.get("position") or "").strip()
+        for k in name_keys(r.get("name") or ""):
+            dr_by_name.setdefault((k, pos), line)
+
+    dr_master = apply_overrides(
         apply_overrides(list(master), overrides["all"], "all/drafters", report),
         overrides["drafters"], "drafters", report)
-    drafters_out = os.path.join(DOWNLOADS, f"DraftersRankings_from_DK_{TODAY}.csv")
-    with open(drafters_out, "w", newline="") as f:
-        w = csv.writer(f)
-        # Drafters' importer wants lowercase headers (upload rejected the
-        # DK-style capitalized ones, 2026-08-14)
-        w.writerow(["id", "name", "position", "adp", "team"])
-        for r in drafters_order:
-            w.writerow([r["ID"], r["Name"], r["Position"], r["ADP"], r["Team"]])
+    ranked_lines, seen, dr_unmatched = [], set(), []
+    for row in dr_master:
+        hit = None
+        for k in name_keys(row["Name"]):
+            hit = dr_by_name.get((k, row["Position"]))
+            if hit is not None:
+                break
+        if hit is not None and id(hit) not in seen:
+            seen.add(id(hit))
+            ranked_lines.append(hit)
+        elif hit is None:
+            dr_unmatched.append(f"{row['Name']} ({row['Position']})")
+    tail_lines = [ln for ln in data_lines if id(ln) not in seen]
 
-    # ── Underdog: reorder their template rows ────────────────────────────
-    xwalk = fetch_crosswalk()
-    ud_by_pid = {r["playerId"]: r for r in ud_rows}
-    ud_by_name = {}
-    for r in ud_rows:
-        pos = (r.get("slotName") or "").strip()
-        for k in name_keys(f"{r['firstName']} {r['lastName']}"):
-            ud_by_name.setdefault((k, pos), r)
-
-    ud_order_ids = []
-    seen = set()
-    unmatched = []
-    id_hits = name_hits = 0
-    ud_master = apply_overrides(
-        apply_overrides(list(master), overrides["all"], "all/underdog", report),
-        overrides["underdog"], "underdog", report)
-    for row in ud_master:
-        ud_row = None
-        p = xwalk.get(row["ID"])
-        # underdog_postdraft_id is the file's playerId for most players;
-        # player_id doubles as the UD UUID only for newer inserts.
-        if p:
-            for cand in (p.get("underdog_postdraft_id"), p.get("player_id")):
-                if cand and cand in ud_by_pid:
-                    ud_row = ud_by_pid[cand]
-                    id_hits += 1
-                    break
-        if ud_row is None:
-            for k in name_keys(row["Name"]):
-                ud_row = ud_by_name.get((k, row["Position"]))
-                if ud_row:
-                    name_hits += 1
-                    break
-        if ud_row and ud_row["playerId"] not in seen:
-            seen.add(ud_row["playerId"])
-            ud_order_ids.append(ud_row)
-        elif not ud_row:
-            unmatched.append(f"{row['Name']} ({row['Position']})")
-
-    tail = [r for r in ud_rows if r["playerId"] not in seen]
-    ud_out = os.path.join(DOWNLOADS, f"UnderdogRankings_from_DK_{TODAY}.csv")
-    with open(ud_out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=ud_fields, quoting=csv.QUOTE_ALL)
-        w.writeheader()
-        w.writerows(ud_order_ids + tail)
-
-    # ── Report ───────────────────────────────────────────────────────────
-    print(f"\nDrafters: wrote {len(drafters_order)} rows -> {drafters_out}")
-    print(f"Underdog: wrote {len(ud_order_ids)} ranked + {len(tail)} tail rows -> {ud_out}")
-    print(f"  matched via crosswalk: {id_hits} · via name+pos: {name_hits} · unmatched: {len(unmatched)}")
-    if unmatched:
-        print("  UNMATCHED (in DK top list, absent from UD file — check pool/name):")
-        for u in unmatched[:15]:
+    dr_out = os.path.join(DOWNLOADS, f"DraftersRankings_from_DK_{TODAY}.csv")
+    with open(dr_out, "w", newline="", encoding="utf-8") as f:
+        f.write(header)
+        f.writelines(ranked_lines + tail_lines)
+    print(f"\nDrafters: wrote {len(ranked_lines)} ranked + {len(tail_lines)} tail rows -> {dr_out}")
+    print(f"  matched by name+pos: {len(ranked_lines)} · unmatched: {len(dr_unmatched)}")
+    if dr_unmatched:
+        print("  UNMATCHED (in DK top list, absent from the drafters file — check pool/name):")
+        for u in dr_unmatched[:15]:
             print(f"    - {u}")
+
     for line in report:
         print(line)
     print("\nUpload each file on its site. DK master was not modified.")

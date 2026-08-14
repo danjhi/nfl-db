@@ -1,10 +1,15 @@
-"""Pull Dan's live DK pre-draft rankings (the drag-and-drop board) via the API.
+"""Pull DK's MARKET order (rank field = ADP-ordered default board) via the API.
 
-The authenticated rankings/v1 playerpool response carries `rank` = Dan's own
-saved order (verified 2026-08-14: API order == his board incl. the previous
-night's edits; the manual CSV download is just a snapshot of the same state).
-Writes a DkPreDraftRankings-format CSV to ~/Downloads so tandem_from_dk.py's
-newest-file glob picks it up — the manual download step is now optional.
+WARNING — NOT Dan's rankings. The playerpool `rank` field tracks DK's default
+(ADP) order, not the user's saved drag-and-drop board: on 2026-08-14 it put
+Pitts at 89 (his ADP 89.7, Dan's rank 78) and Henderson at 61 (ADP 61.8,
+Dan's rank 74). Dan caught this before drafting on CSVs built from it. The
+diff-vs-his-CSV "verification" that day was fooled because personal rankings
+correlate with ADP. His board is only available via the manual CSV download
+(DkPreDraftRankings) — which stays step 1 of the tandem loop.
+
+Kept for market-order pulls only. Output filename deliberately does NOT match
+tandem_from_dk.py's DkPreDraftRankings* glob.
 
 Usage:
     python3 scripts/rankings/pull_dk_master.py
@@ -24,13 +29,14 @@ from shared import SUPABASE_URL, SUPABASE_SERVICE_KEY  # noqa: E402
 import fetch_draftkings_postdraft_adp as dk  # noqa: E402
 
 OUT = os.path.expanduser(
-    f"~/Downloads/DkPreDraftRankings_api_{datetime.date.today().isoformat()}.csv")
+    f"~/Downloads/DkMarketOrder_{datetime.date.today().isoformat()}.csv")
 
 
 def main():
     players = dk.fetch_dk_players()
     players.sort(key=lambda p: p["rank"])
-    print(f"  {len(players)} players, ordered by your saved rank")
+    print(f"  {len(players)} players in DK MARKET order (rank field = ADP order,")
+    print("  NOT your saved rankings — use the DkPreDraftRankings download for those)")
 
     req = urllib.request.Request(
         f"{SUPABASE_URL}/rest/v1/players?draftkings_id=not.is.null"

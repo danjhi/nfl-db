@@ -8,8 +8,9 @@ Dan's workflow (heavy-draft-season loop):
        ~/Downloads/DraftersRankings_from_DK_{date}.csv   (DK column format —
          Drafters' upload accepts it; same shape as the hand-made 2026-08-10 file)
        ~/Downloads/UnderdogRankings_from_DK_{date}.csv   (Underdog's own template,
-         rows reordered; download a fresh UD rankings CSV first — appearance ids
-         are slate-specific)
+         rows reordered; template comes from data/ud_rankings_latest.csv, which
+         the daily fetch_underdog_postdraft_adp.py run persists each morning —
+         no manual UD download needed; falls back to ~/Downloads/rankings-*.csv)
   4. Upload each file on its site.
 
 Matching DK -> Underdog: primary via the players-table crosswalk
@@ -50,6 +51,7 @@ from shared import (  # noqa: E402
 TODAY = datetime.date.today().isoformat()
 DOWNLOADS = os.path.expanduser("~/Downloads")
 DEFAULT_OVERRIDES = os.path.normpath(os.path.join(_script_dir, "..", "..", "data", "tandem_overrides.json"))
+UD_LATEST = os.path.normpath(os.path.join(_script_dir, "..", "..", "data", "ud_rankings_latest.csv"))
 
 
 def newest(pattern, label):
@@ -99,9 +101,18 @@ def fetch_crosswalk():
     return {str(r["draftkings_id"]): r for r in rows}
 
 
-def norm(name):
+def name_keys(name):
+    """Normalized name plus its alias form (if any). The alias map is
+    bidirectional pairs, so indexing AND looking up through a single hop
+    would swap both sides past each other — index and look up under BOTH
+    forms instead."""
     n = normalize_name(name)
-    return PLAYER_ALIASES.get(n, n)
+    a = PLAYER_ALIASES.get(n)
+    return [n, a] if a and a != n else [n]
+
+
+def norm(name):
+    return name_keys(name)[0]
 
 
 def apply_overrides(order, moves, site, report):
@@ -131,7 +142,12 @@ def main():
     args = ap.parse_args()
 
     dk_path = args.dk or newest(os.path.join(DOWNLOADS, "DkPreDraftRankings*.csv"), "DK rankings")
-    ud_path = args.ud or newest(os.path.join(DOWNLOADS, "rankings-*.csv"), "Underdog rankings")
+    if args.ud:
+        ud_path = args.ud
+    elif os.path.exists(UD_LATEST):
+        ud_path = UD_LATEST
+    else:
+        ud_path = newest(os.path.join(DOWNLOADS, "rankings-*.csv"), "Underdog rankings")
     print(f"DK master:  {os.path.basename(dk_path)}  (modified {datetime.date.fromtimestamp(os.path.getmtime(dk_path))})")
     print(f"UD template: {os.path.basename(ud_path)}  (modified {datetime.date.fromtimestamp(os.path.getmtime(ud_path))})")
 
@@ -162,8 +178,9 @@ def main():
     ud_by_pid = {r["playerId"]: r for r in ud_rows}
     ud_by_name = {}
     for r in ud_rows:
-        key = (norm(f"{r['firstName']} {r['lastName']}"), (r.get("slotName") or "").strip())
-        ud_by_name.setdefault(key, r)
+        pos = (r.get("slotName") or "").strip()
+        for k in name_keys(f"{r['firstName']} {r['lastName']}"):
+            ud_by_name.setdefault((k, pos), r)
 
     ud_order_ids = []
     seen = set()
@@ -184,9 +201,11 @@ def main():
                     id_hits += 1
                     break
         if ud_row is None:
-            ud_row = ud_by_name.get((norm(row["Name"]), row["Position"]))
-            if ud_row:
-                name_hits += 1
+            for k in name_keys(row["Name"]):
+                ud_row = ud_by_name.get((k, row["Position"]))
+                if ud_row:
+                    name_hits += 1
+                    break
         if ud_row and ud_row["playerId"] not in seen:
             seen.add(ud_row["playerId"])
             ud_order_ids.append(ud_row)

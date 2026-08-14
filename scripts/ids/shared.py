@@ -120,6 +120,8 @@ TEAM_FULLNAME_TO_ABBR = {
 # Maps normalized alternate names to normalized canonical names.
 # Used by build_player_lookup to index players under both names.
 PLAYER_ALIASES = {
+    "nick singleton": "nicholas singleton",
+    "nicholas singleton": "nick singleton",
     "hollywood brown": "marquise brown",
     "marquise brown": "hollywood brown",
     "chig okonkwo": "chigoziem okonkwo",

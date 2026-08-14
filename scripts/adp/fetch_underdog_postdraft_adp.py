@@ -106,6 +106,19 @@ def fetch_underdog_csv():
             path = dl.path()
             with open(path) as f:
                 text = f.read()
+            # Persist the raw rankings CSV: it doubles as the Underdog upload
+            # template for scripts/rankings/tandem_from_dk.py (same file the
+            # site's download button serves; appearance ids are slate-specific
+            # so freshest wins). Written before parsing so a parse hiccup
+            # can't lose the day's template.
+            raw_out = os.path.normpath(os.path.join(
+                _script_dir, "..", "..", "data", "ud_rankings_latest.csv"))
+            try:
+                with open(raw_out, "w") as rf:
+                    rf.write(text)
+                print(f"  Raw rankings CSV persisted to {os.path.basename(raw_out)}")
+            except OSError as e:
+                print(f"  WARN: could not persist raw rankings CSV: {e}")
         except Exception as e:
             print(f"ERROR: download failed: {type(e).__name__}: {str(e)[:200]}")
             # Don't blame Cloudflare when the machine is simply offline

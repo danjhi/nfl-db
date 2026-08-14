@@ -169,9 +169,12 @@ def main():
         overrides["drafters"], "drafters", report)
     drafters_out = os.path.join(DOWNLOADS, f"DraftersRankings_from_DK_{TODAY}.csv")
     with open(drafters_out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["ID", "Name", "Position", "ADP", "Team"])
-        w.writeheader()
-        w.writerows(drafters_order)
+        w = csv.writer(f)
+        # Drafters' importer wants lowercase headers (upload rejected the
+        # DK-style capitalized ones, 2026-08-14)
+        w.writerow(["id", "name", "position", "adp", "team"])
+        for r in drafters_order:
+            w.writerow([r["ID"], r["Name"], r["Position"], r["ADP"], r["Team"]])
 
     # ── Underdog: reorder their template rows ────────────────────────────
     xwalk = fetch_crosswalk()

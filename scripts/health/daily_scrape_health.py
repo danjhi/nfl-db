@@ -114,22 +114,34 @@ SOURCES = [
     },
     {
         "name": "sleeper_sf", "floor": 400,
-        "active": (None, None),  # always-on
+        # ADP stages retired from the Sleeper trio 2026-09-11 (trades still
+        # run daily). Window closed on the last day a row landed so the
+        # check skips it instead of alerting. Reopen with (None, None).
+        "active": ("2026-04-27", "2026-09-11"),
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],
     },
     {
         "name": "sleeper_1qb", "floor": 300,
-        "active": (None, None),
+        # ADP stages retired from the Sleeper trio 2026-09-11 (trades still
+        # run daily). Window closed on the last day a row landed so the
+        # check skips it instead of alerting. Reopen with (None, None).
+        "active": ("2026-04-27", "2026-09-11"),
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],
     },
     {
         "name": "sleeper_sf_rookie", "floor": 40,
-        "active": (None, None),
+        # ADP stages retired from the Sleeper trio 2026-09-11 (trades still
+        # run daily). Window closed on the last day a row landed so the
+        # check skips it instead of alerting. Reopen with (None, None).
+        "active": ("2026-04-27", "2026-09-11"),
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],
     },
     {
         "name": "sleeper_1qb_rookie", "floor": 30,
-        "active": (None, None),
+        # ADP stages retired from the Sleeper trio 2026-09-11 (trades still
+        # run daily). Window closed on the last day a row landed so the
+        # check skips it instead of alerting. Reopen with (None, None).
+        "active": ("2026-04-27", "2026-09-11"),
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],
     },
 ]

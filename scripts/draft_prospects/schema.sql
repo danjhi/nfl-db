@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS draft_prospects (
   value                 NUMERIC,          -- Dan: 1QB dynasty trade value
   sf_value              NUMERIC,          -- Dan: superflex dynasty trade value
   writeup               TEXT,             -- Dan's own prospect copy (UPDATE_PLAN D1)
+  analyst_note          TEXT,             -- Mike Kashuba's report (sheet `note`), IS site copy
+  analyst_note_date     DATE,             -- sheet `date`, else the day the note text changed
+  analyst_name          TEXT,             -- byline, set by the sync ('Mike Kashuba')
   values_updated_at     TIMESTAMPTZ,      -- set by the sheet sync, not by seed loads
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );

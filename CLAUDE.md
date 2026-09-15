@@ -209,6 +209,15 @@ FBG "News and Notes" pipeline → `news_items` (status='draft' for review). Item
 | `dynasty_values_sync.js` | Sync dynasty values from Google Sheet → Supabase. Paste into Extensions → Apps Script. Uses service role key stored in Script Properties. |
 | `dynasty_value_history_sync.js` | Sync dynasty value change log from Google Sheet → Supabase. Same setup pattern as dynasty_values_sync. Matches Player names to player_id via normalized name lookup. |
 
+### Draft Prospects (`scripts/draft_prospects/`)
+
+2027 NFL Draft prospect board behind the DTVC Plus "2027 Prospects" rookie tab. The table is Dan's (`dan_id` = kebab slug like `jeremiah-smith-2027`); `value` / `sf_value` are owned by Mike Kashuba's shared Google Sheet ("2027 Dynasty Prospects - Shared Board", pull model agreed 2026-08-25).
+
+| Script | Purpose |
+|--------|---------|
+| `schema.sql` | DDL + 2026-07-16 bio seed (60 prospects). Re-runnable; never touches value columns |
+| `sync_kashuba_sheet.py` | Daily pull of Kashuba's sheet (service account `ff-stat-sim@nfl-449313`, key at `~/dev/ff-stat-sim/.gcp-sheets-sa.json` or `GOOGLE_APPLICATION_CREDENTIALS`) -> PATCH `value` / `sf_value` / `values_updated_at` on name-matched rows only. Dry run by default; `--apply` writes (pre-state backup to `data/draft_prospects/`), `--force` lifts the 15-point single-move / 30-row per-run guards, `--allow-cuts` lets a blank pair null a prospect (hides it on the site). Unmatched sheet names are reported, never created; table rows missing from the sheet are never deleted. Writes a "Sync Status" tab back to the sheet. DTVC Plus reads the table with the anon key and caches core data ~4h, so writes go live within that window with no deploy. First live run 2026-09-15 (19 of 60 changed). Laptop launchd `com.nfldb.laptop-kashuba-prospects` 11:20 daily |
+
 ### FBG Bowl (`scripts/fbg_bowl/`)
 
 Complete ETL pipeline for FBG Bowl historical data. Both 2024 and 2025 fully loaded. 12-team Sleeper-based competition.
@@ -409,6 +418,7 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | Drafters ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-drafters-postdraft-adp.plist` | 8:25 AM | inline Python → `fetch_drafters_postdraft_adp.py` |
 | DraftKings ADP (post-draft, Apr 27–Sep 10) | `~/Library/LaunchAgents/com.nfldb.daily-draftkings-postdraft-adp.plist` | 8:30 AM | inline Python → `fetch_draftkings_postdraft_adp.py` |
 | Team Refresh | `~/Library/LaunchAgents/com.nfldb.daily-team-refresh.plist` | 8:15 AM | inline Python → `refresh_player_teams.py` |
+| Team Refresh, in-season (laptop, Sep 1 – Feb 15) | `~/Library/LaunchAgents/com.nfldb.laptop-team-refresh.plist` (installed 2026-09-15; version-controlled in `scripts/launchd/laptop/`) | Tuesdays 9:20 AM | venv Python → `refresh_player_teams.py` (weekly; the offseason Desktop job above is gated Feb 19 – Apr 22, which is why teams drifted in-season until 2026-09-15). Log `data/logs/team_refresh.log`. |
 | Schedule Refresh | `~/Library/LaunchAgents/com.nfldb.daily-schedule.plist` (TODO) | 8:35 AM (planned, May 15 – Feb 15) | inline Python → `fetch_sleeper_schedule.py` (captures flex moves + postseason bracket as it fills) |
 | Odds Snapshot | `~/Library/LaunchAgents/com.nfldb.daily-odds.plist` (TODO) | 8:40 AM (planned, Jul 1 – Feb 15) | inline Python → `fetch_odds_snapshot.py` (~3 credits/run on 20K/mo budget) |
 | Sleeper trio (trades + drafts + compute_adp) | `~/Library/LaunchAgents/com.sleeper.daily-scrape.plist` | 8:45 AM | inline Python → `scrape_trades.py --active-only` (7-day window, ~50 min) → `scrape_drafts.py --refresh` (~15 min) → `compute_adp.py` (<1 min). Lives in `~/dev/sleeper-scrape/`. Was 2 PM until May 2026 — moved to 8:45 AM after launchd missed firings. Run `--refresh` (full 15K leagues) manually weekly to catch leagues outside the active window. |
@@ -419,6 +429,7 @@ All jobs use `/usr/bin/python3 -c` inline Python via launchd. Date-gated to Feb 
 | CBS ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-cbs-adp.plist` | 1:30 PM | venv Python → `fetch_cbs_adp.py` (`source=cbs`). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/cbs_adp.log`. |
 | Yahoo ADP (laptop-primary, Jul 10–Sep 10) | `~/Library/LaunchAgents/com.nfldb.laptop-yahoo-adp.plist` | 1:35 PM | venv Python → `fetch_yahoo_adp.py` (`source=yahoo`). Public read-only API, no auth. Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/yahoo_adp.log`. |
 | FBG News (laptop-primary, **year-round**) | `~/Library/LaunchAgents/com.nfldb.laptop-fbg-news.plist` | 1:40 PM | venv Python → `fetch_fbg_news.py --limit 7` (scrape /updates → `news_items`). No date gate. Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/fbg_news.log`. |
+| Kashuba 2027 prospects (laptop-primary, **year-round**) | `~/Library/LaunchAgents/com.nfldb.laptop-kashuba-prospects.plist` | 11:20 AM | venv Python → `scripts/draft_prospects/sync_kashuba_sheet.py --apply` (Google Sheet → `draft_prospects` value/sf_value). Version-controlled in `scripts/launchd/laptop/`. Log `data/logs/kashuba_prospects.log`. |
 
 **Laptop plists** (`scripts/launchd/laptop/`, `com.nfldb.laptop-*`, venv Python + certifi env vars, installed via `launchctl bootstrap gui/$(id -u)`): midday redundancy copies of the postdraft ADP + health jobs, plus the two **laptop-primary** footballguys.com/adp own-source scrapers (`rtsports`, `nffc`) which have no Desktop counterpart. See `scripts/launchd/laptop/README.md`.
 

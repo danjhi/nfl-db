@@ -11,6 +11,7 @@ day just overwrites the same rows — no duplicates.
 
 | Plist | Runs | Desktop counterpart |
 |-------|------|---------------------|
+| `com.nfldb.laptop-team-refresh` | Tue 09:20 (weekly) | daily-team-refresh (08:15, gated Feb 19 to Apr 22) — laptop job is the in-season half: Sleeper API -> `players.latest_team`, gated `20260901`–`20270215`, writes only real team changes, never nulls (Dan 2026-09-15, after 72 stale teams surfaced on the DTVC chart) |
 | `com.nfldb.laptop-drafters-postdraft-adp` | 13:00 | daily-drafters-postdraft-adp (08:25) |
 | `com.nfldb.laptop-underdog-postdraft-adp` | 13:05 | daily-underdog-postdraft-adp (08:20) |
 | `com.nfldb.laptop-draftkings-postdraft-adp` | 13:10 | daily-draftkings-postdraft-adp (08:30) |
@@ -20,6 +21,7 @@ day just overwrites the same rows — no duplicates.
 | `com.nfldb.laptop-cbs-adp` | 13:30 | — (laptop-primary; `source=cbs`) |
 | `com.nfldb.laptop-yahoo-adp` | 13:35 | — (laptop-primary; `source=yahoo`) |
 | `com.nfldb.laptop-fbg-news` | 13:40 | — (laptop-primary; scrapes /updates → `news_items`, **no date gate**) |
+| `com.nfldb.laptop-kashuba-prospects` | 11:20 | — (laptop-primary; Mike Kashuba's 2027 prospect Google Sheet → `draft_prospects` value/sf_value via `scripts/draft_prospects/sync_kashuba_sheet.py --apply`, **no date gate**; needs `GOOGLE_APPLICATION_CREDENTIALS` → ff-stat-sim's `.gcp-sheets-sa.json`, set in the plist) |
 | `com.nfldb.laptop-health-check` | 14:00 | daily-health-check (12:00) |
 
 The two own-source scrapers are date-gated `20260710`–`20260910` (draft season) inline;
@@ -41,10 +43,10 @@ Championship) — bump yearly.
 
 ```bash
 cp scripts/launchd/laptop/com.nfldb.laptop-*.plist ~/Library/LaunchAgents/
-for L in com.nfldb.laptop-drafters-postdraft-adp com.nfldb.laptop-underdog-postdraft-adp \
+for L in com.nfldb.laptop-team-refresh com.nfldb.laptop-drafters-postdraft-adp com.nfldb.laptop-underdog-postdraft-adp \
          com.nfldb.laptop-draftkings-postdraft-adp com.nfldb.laptop-rtsports-adp \
          com.nfldb.laptop-nffc-adp com.nfldb.laptop-espn-adp com.nfldb.laptop-cbs-adp \
-         com.nfldb.laptop-yahoo-adp com.nfldb.laptop-fbg-news com.nfldb.laptop-health-check; do
+         com.nfldb.laptop-yahoo-adp com.nfldb.laptop-fbg-news com.nfldb.laptop-kashuba-prospects com.nfldb.laptop-health-check; do
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$L.plist
 done
 launchctl list | grep nfldb.laptop          # verify

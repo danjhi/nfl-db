@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Weekly in-season refresh of players.latest_team from the Sleeper API
+	     (Dan 2026-09-15: the chart was showing players on stale teams because the
+	     Desktop daily job is gated to the offseason FA window). Tuesdays 09:20,
+	     after Monday night's moves and inside the laptop wake window. Gated
+	     Sep 1 to Feb 15; the Desktop job covers Feb 19 to Apr 22. Writes only
+	     when Sleeper shows a new team, never nulls a team. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/danielhindery</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>REQUESTS_CA_BUNDLE</key>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+		<key>SSL_CERT_FILE</key>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+	</dict>
+	<key>Label</key>
+	<string>com.nfldb.laptop-team-refresh</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-is</string>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/bin/python3</string>
+		<string>-u</string>
+		<string>-c</string>
+		<string>
+import os, sys, datetime as _dt, signal
+signal.alarm(600)  # 10-min wall-clock cap
+os.chdir('/Users/danielhindery/dev/nfl-db')
+today = _dt.date.today().strftime('%Y%m%d')
+if today &lt; '20260901' or today &gt; '20270215':
+    print(f"{_dt.datetime.now()}: Outside date range ({today}), skipping.")
+    sys.exit(0)
+print(f"{_dt.datetime.now()}: [laptop] Starting weekly Sleeper team refresh...")
+sys.argv = ['refresh_player_teams.py']
+__file__ = 'scripts/ids/refresh_player_teams.py'
+exec(compile(open(__file__).read(), __file__, 'exec'))
+print(f"{_dt.datetime.now()}: Done.")  # _dt alias: the exec'd script rebinds datetime
+        </string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/danielhindery/dev/nfl-db/data/logs/team_refresh.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/danielhindery/dev/nfl-db/data/logs/team_refresh.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>2</integer>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>20</integer>
+	</dict>
+</dict>
+</plist>

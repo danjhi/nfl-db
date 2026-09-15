@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Daily pull of Mike Kashuba's "2027 Dynasty Prospects - Shared Board" Google Sheet
+	     into draft_prospects (value / sf_value + his dated notes). 11:20: after the FBG
+	     scrapes, before the 11:25 health check, inside the laptop's morning wake window.
+	     Guardrails, the wall-clock cap and the Sync Status writeback live inside the
+	     script. No date gate: the 2027 board is in-season content through the 2027 draft.
+	     Installed 2026-09-15 on Dan's ask. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/danielhindery</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>REQUESTS_CA_BUNDLE</key>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+		<key>SSL_CERT_FILE</key>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/lib/python3.11/site-packages/certifi/cacert.pem</string>
+		<key>GOOGLE_APPLICATION_CREDENTIALS</key>
+		<string>/Users/danielhindery/dev/ff-stat-sim/.gcp-sheets-sa.json</string>
+	</dict>
+	<key>Label</key>
+	<string>com.nfldb.laptop-kashuba-prospects</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/danielhindery/dev/nfl-db</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-is</string>
+		<string>/Users/danielhindery/dev/nfl-db/.venv/bin/python3</string>
+		<string>-u</string>
+		<string>scripts/draft_prospects/sync_kashuba_sheet.py</string>
+		<string>--apply</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/danielhindery/dev/nfl-db/data/logs/kashuba_prospects.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/danielhindery/dev/nfl-db/data/logs/kashuba_prospects.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>11</integer>
+		<key>Minute</key>
+		<integer>20</integer>
+	</dict>
+</dict>
+</plist>

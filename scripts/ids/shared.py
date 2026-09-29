@@ -24,7 +24,7 @@ SUPABASE_URL = "https://twfzcrodldvhpfaykasj.supabase.co"
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_PAT = os.environ.get("SUPABASE_ACCESS_TOKEN", "")
-SPORTSDATA_KEY = os.environ.get("SPORTSDATA_API_KEY", "")
+SPORTSDATA_KEY = os.environ.get("SPORTSDATA_API_KEY", "") or os.environ.get("SPORTSDATA_KEY", "")
 FBG_KEY = os.environ.get("FBG_API_KEY", "")
 PROJECT_REF = "twfzcrodldvhpfaykasj"
 

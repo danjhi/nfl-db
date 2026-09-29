@@ -37,6 +37,10 @@ import xml.etree.ElementTree as ET
 
 _script_dir = os.path.dirname(os.path.abspath(__file__)) if os.path.exists(__file__) else os.path.join("scripts", "adp")
 sys.path.insert(0, os.path.join(_script_dir, "..", "ids"))
+# Own dir too: launchd's inline-exec pattern doesn't auto-add the script's
+# directory the way a normal `python3 path/to/script.py` run does, so the
+# fetch_cbs_adp import below died under the plist (every run since 08-23).
+sys.path.insert(0, _script_dir)
 from shared import (  # noqa: E402
     normalize_name,
     normalize_team,

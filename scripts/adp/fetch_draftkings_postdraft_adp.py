@@ -61,7 +61,12 @@ def fetch_dk_players():
 
     print(f"  Loading session from {os.path.basename(SESSION_FILE)}")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Headful since 2026-08-26: Akamai extended headless-detection to
+        # api.draftkings.com (~08-25) — headless gets the Access Denied page
+        # regardless of cookies/UA/stealth args, headful with the same session
+        # returns 200. Same wall + fix as the sportsbook pages (fetch_draftkings_lines.py,
+        # 2026-07). A Chromium window pops for a few seconds during the daily run.
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(storage_state=SESSION_FILE)
         page = context.new_page()
         print(f"  Fetching DK post-draft playerpool API (draftgroup 146136)…")

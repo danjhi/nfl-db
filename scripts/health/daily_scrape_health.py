@@ -18,6 +18,11 @@ two situations distinctly instead of leaving them as generic FAILs:
     (launchd fires missed jobs on wake), so staleness may be wake lag,
     not breakage — the 2026-07-22 vacation FAIL(11) email was this.
 
+Also checks the Sleeper dynasty trade DB (sleeper_trades): the newest trade
+must be under MAX_TRADE_AGE_HOURS old and the last 48 hours must hold at least
+TRADE_FLOOR_48H trades. Added 2026-10-06 after the scraper silently checked only
+the offseason transaction rounds for three weeks (last trade 09-17, jobs exit 0).
+
 If anything's off, fires a macOS notification (banner + sound).
 Always writes a daily report to data/logs/health_<date>.txt.
 
@@ -145,6 +150,43 @@ SOURCES = [
         "logs": [os.path.join(SLEEPER_LOG_DIR, "daily_scrape.log")],
     },
 ]
+
+# Sleeper dynasty trade DB freshness (sleeper-scrape pushes daily, 9:00 + 10:00).
+# Trades happen every day all year (about 1,000/day in season, 400/day in May),
+# so a newest trade older than ~a day means the scrape or the push is broken.
+MAX_TRADE_AGE_HOURS = 30
+TRADE_FLOOR_48H = 150
+
+
+def check_sleeper_trades():
+    """(status, detail, reason): reason is None when healthy. Raises NetworkDown."""
+    import json
+
+    try:
+        url = (f"{SUPABASE_URL}/rest/v1/sleeper_trades"
+               f"?select=created_ms&order=created_ms.desc&limit=1")
+        rows = json.loads(_get(url).read().decode("utf-8"))
+        if not rows:
+            return ("FAIL", "no rows", "no rows in sleeper_trades")
+        newest = datetime.datetime.fromtimestamp(rows[0]["created_ms"] / 1000, datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        age_hours = (now - newest).total_seconds() / 3600
+        since_ms = int((now.timestamp() - 48 * 3600) * 1000)
+        url = f"{SUPABASE_URL}/rest/v1/sleeper_trades?select=count&created_ms=gte.{since_ms}"
+        cr = _get(url, {"Prefer": "count=exact"}).headers.get("content-range", "")
+        n48 = int(cr.split("/")[-1]) if cr else 0
+    except urllib.error.HTTPError:
+        return ("ERROR", "Supabase query failed", "Supabase query failed")
+    except urllib.error.URLError as e:
+        raise NetworkDown(getattr(e, "reason", e)) from e
+    reasons = []
+    if age_hours > MAX_TRADE_AGE_HOURS:
+        reasons.append(f"stale: newest trade {age_hours:.0f}h old (max {MAX_TRADE_AGE_HOURS}h)")
+    if n48 < TRADE_FLOOR_48H:
+        reasons.append(f"{n48} trades in 48h < floor {TRADE_FLOOR_48H}")
+    detail = f"{n48:>5} trades in 48h, newest {newest:%Y-%m-%d %H:%M}Z ({age_hours:.1f}h ago)"
+    return ("FAIL" if reasons else "OK", detail, "; ".join(reasons) or None)
+
 
 # Patterns that indicate a script-level failure worth flagging
 ERROR_PATTERNS = [
@@ -424,6 +466,19 @@ def main():
             if auth:
                 auth_failures.append(src["name"])
 
+    # Sleeper dynasty trade DB (always active; the trades scrape runs year-round)
+    if offline is None:
+        try:
+            status, detail, reason = check_sleeper_trades()
+            summary_lines.append(f"  {status:6s} {'sleeper_trades':25s} {detail}")
+            if reason:
+                summary_lines.append("    Check ~/dev/sleeper-scrape/logs (daily_refresh.log, daily_scrape.log):")
+                summary_lines.append("    a run that 'finds 0 new trades' every day is the 2026-10-06 failure mode.")
+                failures.append(("sleeper_trades", reason))
+        except NetworkDown as e:
+            offline = str(e)
+            summary_lines.append(f"  OFFLINE — Supabase unreachable ({offline}).")
+
     # Write daily report
     os.makedirs(LOG_DIR, exist_ok=True)
     report_path = os.path.join(LOG_DIR, f"health_{TODAY}.txt")
@@ -462,7 +517,7 @@ def main():
         print(f"\nNotification sent: {title}")
         sys.exit(1)
     elif force:
-        active_count = len([s for s in SOURCES if is_active(s['active'])])
+        active_count = len([s for s in SOURCES if is_active(s['active'])]) + 1  # + sleeper_trades
         send_notification(f"NFL DB {MACHINE} scrape OK", f"All {active_count} sources OK", sound=False)
         send_email(f"[NFL DB {MACHINE}] Scrape OK ({active_count} sources)", summary + "\n")
         print("\n[--force] Notification sent (success)")
